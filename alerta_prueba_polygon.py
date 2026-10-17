@@ -143,4 +143,7 @@ def procesar_alertas():
             guardar_historial(historial)
 
 if __name__ == '__main__':
+    # Línea temporal para forzar un mensaje y probar Telegram
+    enviar_telegram_texto("✅ PRUEBA: El bot de GitHub se comunicó con Telegram exitosamente.")
+    
     procesar_alertas()
