@@ -4,7 +4,6 @@ import requests
 import re
 from datetime import datetime
 
-# Diccionario con las localidades y sus coordenadas (Latitud, Longitud)
 LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
@@ -14,7 +13,6 @@ LOCALIDADES = {
 
 RSS_URL = 'https://ssl.smn.gob.ar/CAP/AR.php'
 
-# Configuración de Telegram
 TELEGRAM_BOT_TOKEN = '8882322196:AAGYo3rXhptjmA4vzkt-hvkKZ6QT8b3T7ZM'
 TELEGRAM_CHANNEL_ID = '-1004459131844'
 HISTORIAL_FILE = 'historial_alerta_prueba_polygon.json'
@@ -62,21 +60,22 @@ def procesar_alertas():
     historial = cargar_historial()
     
     try:
-        # Descargamos el XML crudo directamente del servidor del SMN
         respuesta = requests.get(RSS_URL, timeout=15)
         xml_text = respuesta.text
     except Exception as e:
         print(f"Error de conexión: {e}")
         return
 
-    # Separamos el texto gigante en bloques por cada "alerta" (<entry>)
-    entradas = re.split(r'<entry[^>]*>', xml_text, flags=re.IGNORECASE)
+    # AQUÍ ESTABA EL ERROR: Ahora busca tanto <entry> como <item>
+    entradas = re.split(r'<(?:entry|item)[^>]*>', xml_text, flags=re.IGNORECASE)
     print(f"Buscando alertas en el feed... Se encontraron {len(entradas)-1} alertas activas.")
 
     for entrada in entradas[1:]:
-        # Extracción de ID y Título
-        m_id = re.search(r'<id[^>]*>(.*?)</id>', entrada, re.IGNORECASE | re.DOTALL)
-        alerta_id = m_id.group(1).strip() if m_id else "ID_DESCONOCIDO"
+        m_id = re.search(r'<guid[^>]*>(.*?)</guid>|<id[^>]*>(.*?)</id>', entrada, re.IGNORECASE | re.DOTALL)
+        if m_id:
+            alerta_id = (m_id.group(1) or m_id.group(2)).strip()
+        else:
+            alerta_id = "ID_DESCONOCIDO"
 
         m_titulo = re.search(r'<title[^>]*>(.*?)</title>', entrada, re.IGNORECASE | re.DOTALL)
         titulo = m_titulo.group(1).strip() if m_titulo else "Alerta"
@@ -88,8 +87,14 @@ def procesar_alertas():
             print("Resultado: IGNORADA (Ya está en el historial).")
             continue
 
-        # BUSCADOR DE POLÍGONOS A PRUEBA DE BALAS EN EL TEXTO CRUDO
+        # Busca la etiqueta del polígono sin importar el prefijo que use el SMN
         polygons_matches = re.findall(r'<[^>]*polygon[^>]*>(.*?)</[^>]*polygon>', entrada, re.IGNORECASE | re.DOTALL)
+        
+        # Si la etiqueta XML tradicional falla, usamos fuerza bruta matemática sobre ese fragmento
+        if not polygons_matches:
+            match = re.search(r'(-\d{1,2}(?:\.\d+)?,-\d{1,3}(?:\.\d+)?(?:\s+-\d{1,2}(?:\.\d+)?,-\d{1,3}(?:\.\d+)?){3,})', entrada)
+            if match: polygons_matches = [match.group(1)]
+
         print(f"Polígonos encontrados: {len(polygons_matches)}")
         
         if not polygons_matches:
@@ -116,7 +121,6 @@ def procesar_alertas():
         if localidades_afectadas:
             print(f"Resultado: ¡ALERTA POSITIVA para {localidades_afectadas}! Enviando a Telegram...")
             
-            # Extraemos el resto de datos desde las etiquetas puras
             m_certeza = re.search(r'<[^>]*certainty[^>]*>(.*?)</[^>]*certainty>', entrada, re.IGNORECASE | re.DOTALL)
             certeza = m_certeza.group(1).strip() if m_certeza else "No especificada"
             
@@ -130,7 +134,6 @@ def procesar_alertas():
             
             m_desc = re.search(r'<[^>]*description[^>]*>(.*?)</[^>]*description>', entrada, re.IGNORECASE | re.DOTALL)
             descripcion_cruda = m_desc.group(1).strip() if m_desc else ""
-            # Limpiamos el texto para que se lea lindo en Telegram
             descripcion = descripcion_cruda.replace('<![CDATA[', '').replace(']]>', '')
             descripcion = re.sub(r'<[^>]+>', '\n', descripcion)
             descripcion = re.sub(r'\n+', '\n', descripcion).strip()
