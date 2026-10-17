@@ -10,7 +10,7 @@ LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
     "Tama": (-30.5058, -66.2952),
-    "Zona de Prueba": (-40.80, -71.50)
+    "San Carlos de Bariloche": (-41.1334, -71.3102)
 }
 
 RSS_URL = 'https://ssl.smn.gob.ar/CAP/AR.php'
@@ -143,7 +143,4 @@ def procesar_alertas():
             guardar_historial(historial)
 
 if __name__ == '__main__':
-    # Línea temporal para forzar un mensaje y probar Telegram
-    enviar_telegram_texto("✅ PRUEBA: El bot de GitHub se comunicó con Telegram exitosamente.")
-    
     procesar_alertas()
