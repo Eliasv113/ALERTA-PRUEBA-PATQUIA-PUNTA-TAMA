@@ -9,7 +9,8 @@ from datetime import datetime
 LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
-    "Tama": (-30.5058, -66.2952)
+    "Tama": (-30.5058, -66.2952),
+    "Zona de Prueba": (-40.80, -71.50)
 }
 
 RSS_URL = 'https://ssl.smn.gob.ar/CAP/AR.php'
