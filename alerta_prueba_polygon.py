@@ -10,7 +10,7 @@ LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
     "Tama": (-30.5058, -66.2952),
-    "San Carlos de Bariloche": (-41.1334, -71.3102)
+    "San Carlos de Bariloche": (-41.0500, -71.3102)
 }
 
 RSS_URL = 'https://ssl.smn.gob.ar/CAP/AR.php'
