@@ -5,17 +5,15 @@ import requests
 import re
 from datetime import datetime
 
-# Diccionario con las localidades y sus coordenadas (Latitud, Longitud)
+# Diccionario con las localidades y sus coordenadas
 LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
     "Tama": (-30.5058, -66.2952),
-    "San Carlos de Bariloche": (-41.0500, -71.3102)
+    "San Carlos de Bariloche": (-40.7500, -71.5000) # Coordenada centrada en el polígono del sur
 }
 
 RSS_URL = 'https://ssl.smn.gob.ar/CAP/AR.php'
-
-# Configuración de Telegram
 TELEGRAM_BOT_TOKEN = '8882322196:AAGYo3rXhptjmA4vzkt-hvkKZ6QT8b3T7ZM'
 TELEGRAM_CHANNEL_ID = '-1004459131844'
 HISTORIAL_FILE = 'historial_alerta_prueba_polygon.json'
@@ -38,12 +36,9 @@ def enviar_telegram_texto(mensaje):
 def punto_en_poligono(latitud, longitud, poligono):
     x, y = longitud, latitud
     adentro = False
-    
     n = len(poligono)
     if n == 0: return False
-        
     p1_y, p1_x = poligono[0]
-    
     for i in range(1, n + 1):
         p2_y, p2_x = poligono[i % n]
         if min(p1_y, p2_y) < y <= max(p1_y, p2_y):
@@ -53,7 +48,6 @@ def punto_en_poligono(latitud, longitud, poligono):
                 if p1_x == p2_x or x <= xinters:
                     adentro = not adentro
         p1_x, p1_y = p2_x, p2_y
-        
     return adentro
 
 def formatear_fecha(fecha_str):
@@ -78,23 +72,22 @@ def procesar_alertas():
             print("Resultado: IGNORADA (Ya está en el historial).")
             continue
             
-        # 1. Buscamos el polígono usando el método robusto de CAP de la librería
-        poligono_str = entry.get('cap_polygon', '')
+        # EXTRAE TODO EL TEXTO CRUDO DE LA ALERTA PARA BUSCAR A LA FUERZA
+        texto_completo = str(entry)
         
-        # Si no lo encuentra por método nativo, fuerza una búsqueda en el texto crudo total
-        if not poligono_str:
-            match = re.search(r'((?:-\d{1,2}(?:\.\d+)?,\s*-\d{1,3}(?:\.\d+)?\s*){4,})', str(entry))
-            if match:
-                poligono_str = match.group(1)
+        # Busca cualquier patrón que sea una cadena larga de coordenadas negativas (Ej: -40.6,-71.04)
+        patron_coordenadas = r'(-\d{1,2}(?:\.\d+)?,-\d{1,3}(?:\.\d+)?(?:\s+-\d{1,2}(?:\.\d+)?,-\d{1,3}(?:\.\d+)?){3,})'
+        match = re.search(patron_coordenadas, texto_completo)
         
-        if not poligono_str:
+        poligono_str = ""
+        if match:
+            poligono_str = match.group(1)
+            print("Polígono ENCONTRADO por fuerza bruta.")
+        else:
             print("Polígonos encontrados: 0")
             print("Resultado: NO afecta a las localidades configuradas.")
             continue
             
-        print("Polígono ENCONTRADO con éxito.")
-        
-        # 2. Convertimos el texto a una lista matemática
         puntos = []
         for par in poligono_str.split():
             partes = par.split(',')
@@ -104,7 +97,6 @@ def procesar_alertas():
                 except ValueError:
                     pass
                     
-        # 3. Cruzamos el polígono con nuestro diccionario de localidades
         localidades_afectadas = set()
         if puntos:
             for nombre_pueblo, (lat, lon) in LOCALIDADES.items():
@@ -114,7 +106,6 @@ def procesar_alertas():
         if localidades_afectadas:
             print(f"Resultado: ¡ALERTA POSITIVA para {localidades_afectadas}! Enviando a Telegram...")
             
-            # Extraemos los datos limpios directamente de las variables del SMN
             certeza = entry.get('cap_certainty', 'No especificada')
             
             inicio_str = entry.get('cap_effective', '')
@@ -123,8 +114,7 @@ def procesar_alertas():
             fin_str = entry.get('cap_expires', '')
             fin = formatear_fecha(fin_str) if fin_str else 'No especificado'
             
-            descripcion_cruda = entry.get('description', '')
-            # Limpiamos etiquetas HTML de la descripción general
+            descripcion_cruda = entry.get('summary', entry.get('description', ''))
             descripcion = re.sub(r'<[^>]+>', '\n', descripcion_cruda)
             descripcion = re.sub(r'\n+', '\n', descripcion).strip()
             
@@ -144,7 +134,7 @@ def procesar_alertas():
             historial.append(alerta_id)
             guardar_historial(historial)
         else:
-            print("Resultado: NO afecta a las localidades configuradas.")
+            print("Resultado: Polígono detectado, pero NO afecta a las localidades configuradas.")
 
 if __name__ == '__main__':
     procesar_alertas()
