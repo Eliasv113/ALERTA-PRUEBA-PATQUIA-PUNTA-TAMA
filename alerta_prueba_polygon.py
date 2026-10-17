@@ -1,9 +1,9 @@
 import os
 import json
 import requests
-import re
 from datetime import datetime
 
+# Diccionario con las localidades y sus coordenadas (Latitud, Longitud)
 LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
@@ -11,7 +11,8 @@ LOCALIDADES = {
     "San Carlos de Bariloche": (-40.7500, -71.5000) # Coordenada de prueba
 }
 
-RSS_URL = 'https://ssl.smn.gob.ar/CAP/AR.php'
+# Endpoint oficial de alertas del SMN en JSON
+API_URL = 'https://www.smn.gob.ar/api/v1/alertas'
 
 TELEGRAM_BOT_TOKEN = '8882322196:AAGYo3rXhptjmA4vzkt-hvkKZ6QT8b3T7ZM'
 TELEGRAM_CHANNEL_ID = '-1004459131844'
@@ -51,7 +52,7 @@ def punto_en_poligono(latitud, longitud, poligono):
 
 def formatear_fecha(fecha_str):
     try:
-        dt = datetime.fromisoformat(fecha_str)
+        dt = datetime.fromisoformat(fecha_str.replace('Z', '+00:00'))
         return dt.strftime('%d/%m/%Y %H:%M')
     except:
         return fecha_str
@@ -60,59 +61,53 @@ def procesar_alertas():
     historial = cargar_historial()
     
     try:
-        respuesta = requests.get(RSS_URL, timeout=15)
-        xml_text = respuesta.text
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        respuesta = requests.get(API_URL, headers=headers, timeout=15)
+        datos = respuesta.json()
     except Exception as e:
-        print(f"Error de conexión: {e}")
+        print(f"Error al conectar con la API del SMN: {e}")
         return
 
-    # AQUÍ ESTABA EL ERROR: Ahora busca tanto <entry> como <item>
-    entradas = re.split(r'<(?:entry|item)[^>]*>', xml_text, flags=re.IGNORECASE)
-    print(f"Buscando alertas en el feed... Se encontraron {len(entradas)-1} alertas activas.")
+    print("Conexión exitosa con la API del SMN.")
 
-    for entrada in entradas[1:]:
-        m_id = re.search(r'<guid[^>]*>(.*?)</guid>|<id[^>]*>(.*?)</id>', entrada, re.IGNORECASE | re.DOTALL)
-        if m_id:
-            alerta_id = (m_id.group(1) or m_id.group(2)).strip()
-        else:
-            alerta_id = "ID_DESCONOCIDO"
+    # La API devuelve una lista de alertas activas
+    alertas = datos if isinstance(datos, list) else [datos]
+    print(f"Se encontraron {len(alertas)} alertas para procesar.")
 
-        m_titulo = re.search(r'<title[^>]*>(.*?)</title>', entrada, re.IGNORECASE | re.DOTALL)
-        titulo = m_titulo.group(1).strip() if m_titulo else "Alerta"
-        titulo = titulo.replace('<![CDATA[', '').replace(']]>', '')
+    for alerta in alertas:
+        alerta_id = str(alerta.get('id', alerta.get('NroAlerta', '')))
+        titulo = alerta.get('fenomeno', alerta.get('title', 'Alerta Meteorológica'))
         
+        if not alerta_id:
+            alerta_id = titulo + str(alerta.get('Certeza', ''))
+
         print(f"\n--- Analizando: {titulo} ---")
         
-        if alerta_id in historial and alerta_id != "ID_DESCONOCIDO":
+        if alerta_id in historial:
             print("Resultado: IGNORADA (Ya está en el historial).")
             continue
 
-        # Busca la etiqueta del polígono sin importar el prefijo que use el SMN
-        polygons_matches = re.findall(r'<[^>]*polygon[^>]*>(.*?)</[^>]*polygon>', entrada, re.IGNORECASE | re.DOTALL)
+        # Buscamos el polígono en la estructura JSON oficial
+        polygons = alerta.get('poligono', alerta.get('polygon', []))
         
-        # Si la etiqueta XML tradicional falla, usamos fuerza bruta matemática sobre ese fragmento
-        if not polygons_matches:
-            match = re.search(r'(-\d{1,2}(?:\.\d+)?,-\d{1,3}(?:\.\d+)?(?:\s+-\d{1,2}(?:\.\d+)?,-\d{1,3}(?:\.\d+)?){3,})', entrada)
-            if match: polygons_matches = [match.group(1)]
-
-        print(f"Polígonos encontrados: {len(polygons_matches)}")
-        
-        if not polygons_matches:
-            print("Resultado: NO afecta a las localidades configuradas (Sin polígonos).")
-            continue
-
         localidades_afectadas = set()
         
-        for p_str in polygons_matches:
+        # Procesamos polígonos si vienen en formato de lista de coordenadas o texto
+        if polygons:
+            # Si el SMN provee una lista de puntos
             puntos = []
-            for par in p_str.split():
-                partes = par.split(',')
-                if len(partes) == 2:
-                    try:
-                        puntos.append((float(partes[0]), float(partes[1])))
-                    except ValueError:
-                        pass
-            
+            if isinstance(polygons, str):
+                pares = polygons.split()
+                for par in pares:
+                    partes = par.split(',')
+                    if len(partes) == 2:
+                        try: puntos.append((float(partes[0]), float(partes[1])))
+                        except: pass
+            elif isinstance(polygons, list):
+                for p in polygons:
+                    try: puntos.append((float(p.get('lat', p.get('latitud', 0))), float(p.get('lon', p.get('longitud', 0)))))
+                    except: pass
+
             if puntos:
                 for nombre_pueblo, (lat, lon) in LOCALIDADES.items():
                     if punto_en_poligono(lat, lon, puntos):
@@ -121,27 +116,15 @@ def procesar_alertas():
         if localidades_afectadas:
             print(f"Resultado: ¡ALERTA POSITIVA para {localidades_afectadas}! Enviando a Telegram...")
             
-            m_certeza = re.search(r'<[^>]*certainty[^>]*>(.*?)</[^>]*certainty>', entrada, re.IGNORECASE | re.DOTALL)
-            certeza = m_certeza.group(1).strip() if m_certeza else "No especificada"
-            
-            m_inicio = re.search(r'<[^>]*effective[^>]*>(.*?)</[^>]*effective>', entrada, re.IGNORECASE | re.DOTALL)
-            inicio_str = m_inicio.group(1).strip() if m_inicio else ""
-            inicio = formatear_fecha(inicio_str) if inicio_str else "No especificado"
-            
-            m_fin = re.search(r'<[^>]*expires[^>]*>(.*?)</[^>]*expires>', entrada, re.IGNORECASE | re.DOTALL)
-            fin_str = m_fin.group(1).strip() if m_fin else ""
-            fin = formatear_fecha(fin_str) if fin_str else "No especificado"
-            
-            m_desc = re.search(r'<[^>]*description[^>]*>(.*?)</[^>]*description>', entrada, re.IGNORECASE | re.DOTALL)
-            descripcion_cruda = m_desc.group(1).strip() if m_desc else ""
-            descripcion = descripcion_cruda.replace('<![CDATA[', '').replace(']]>', '')
-            descripcion = re.sub(r'<[^>]+>', '\n', descripcion)
-            descripcion = re.sub(r'\n+', '\n', descripcion).strip()
+            certeza = alerta.get('certeza', 'No especificada')
+            inicio = formatear_fecha(alerta.get('inicio', ''))
+            fin = formatear_fecha(alerta.get('fin', ''))
+            descripcion = alerta.get('descripcion', alerta.get('description', 'Sin descripción'))
             
             pueblos_str = ", ".join(sorted(localidades_afectadas))
             
             mensaje = (
-                f"🚨 {titulo}\n"
+                f"🚨 Alerta de {titulo}\n"
                 f"📍 Zonas afectadas: {pueblos_str}\n\n"
                 f"Certeza: {certeza}\n\n"
                 f"Inicio: {inicio}\n"
@@ -154,7 +137,7 @@ def procesar_alertas():
             historial.append(alerta_id)
             guardar_historial(historial)
         else:
-            print("Resultado: Polígono detectado, pero NO afecta a las localidades configuradas.")
+            print("Resultado: No afecta a las localidades configuradas.")
 
 if __name__ == '__main__':
     procesar_alertas()
