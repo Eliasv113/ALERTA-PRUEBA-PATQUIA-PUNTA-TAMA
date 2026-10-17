@@ -143,4 +143,15 @@ def procesar_alertas():
                 f"Certeza: {certeza}\n\n"
                 f"Inicio: {inicio}\n"
                 f"Fin: {fin}\n\n"
-                f"{
+                f"{descripcion}\n\n"
+                f"Fuente: https://www.smn.gob.ar/alertas"
+            )
+            
+            enviar_telegram_texto(mensaje)
+            historial.append(alerta_id)
+            guardar_historial(historial)
+        else:
+            print("Resultado: Polígono detectado, pero NO afecta a las localidades configuradas.")
+
+if __name__ == '__main__':
+    procesar_alertas()
