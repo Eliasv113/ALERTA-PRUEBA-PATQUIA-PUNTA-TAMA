@@ -12,7 +12,7 @@ LOCALIDADES = {
 }
 
 # Endpoint oficial de alertas del SMN en JSON
-API_URL = 'https://www.smn.gob.ar/api/v1/alertas'
+API_URL = 'https://ssl.smn.gob.ar/CAP/AR.php'
 
 TELEGRAM_BOT_TOKEN = '8882322196:AAGYo3rXhptjmA4vzkt-hvkKZ6QT8b3T7ZM'
 TELEGRAM_CHANNEL_ID = '-1004459131844'
