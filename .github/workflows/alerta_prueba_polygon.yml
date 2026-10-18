@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: main
+  group: alerta_prueba_polygon
   cancel-in-progress: false
 
 jobs:
