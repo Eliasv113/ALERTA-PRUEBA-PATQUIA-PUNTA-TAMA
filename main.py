@@ -27,7 +27,8 @@ LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
     "Tama": (-30.5058, -66.2952),
-    "San Carlos de Bariloche": (-41.1335, -71.3103),
+    "San Carlos de Bariloche": (-41.1335, -71.3103)
+    "Departamento Confluencia": (-38.9516, -68.0591),
 }
 
 MESES = [
