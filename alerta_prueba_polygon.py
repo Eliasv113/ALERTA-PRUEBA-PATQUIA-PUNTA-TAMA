@@ -16,6 +16,7 @@ LOCALIDADES = {
     "Punta de los Llanos": (-30.1455, -66.5262),
     "Tama": (-30.5058, -66.2952),
     "San Carlos de Bariloche": (-40.7500, -71.5000),
+    "Departamento Confluencia": (-38.9516, -68.0591),
 }
 
 RSS_URL = (
