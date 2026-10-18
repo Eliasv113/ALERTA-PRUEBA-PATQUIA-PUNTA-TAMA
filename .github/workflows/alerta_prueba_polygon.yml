@@ -1,12 +1,17 @@
+
 name: ALERTA PRUEBA POLYGON
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
-  workflow_dispatch: 
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: alerta-prueba-polygon
+  cancel-in-progress: false
 
 jobs:
   ejecutar-bot:
@@ -14,12 +19,12 @@ jobs:
 
     steps:
       - name: Clonar el repositorio
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configurar Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10' 
+          python-version: "3.12"
 
       - name: Instalar dependencias
         run: |
@@ -27,12 +32,21 @@ jobs:
           pip install feedparser requests
 
       - name: Ejecutar el script
-        run: python alerta_prueba_polygon.py 
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: python alerta_prueba_polygon.py
 
       - name: Guardar el historial de alertas
         run: |
-          git config --global user.name 'GitHub Action'
-          git config --global user.email 'action@github.com'
           git add historial_alerta_prueba_polygon.json
-          git commit -m "Actualizar historial PRUEBA POLYGON" || echo "No hay alertas nuevas"
+
+          if git diff --cached --quiet; then
+            echo "No hay alertas nuevas."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Actualizar historial PRUEBA POLYGON"
           git push
