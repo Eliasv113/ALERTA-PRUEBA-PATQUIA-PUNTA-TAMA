@@ -30,6 +30,7 @@ LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
     "Tama": (-30.5058, -66.2952),
+    "Tama Prueba": (-30.50758, -66.54512),
 }
 
 # Límite conservador para las imágenes enviadas como fotos a Telegram.
