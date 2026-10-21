@@ -26,13 +26,12 @@ ZONA_HORARIA = ZoneInfo("America/Argentina/Buenos_Aires")
 
 # Localidades monitoreadas. Se conserva la configuración más reciente
 # del archivo recibido, que incluye San Carlos de Bariloche.
+# Localidades monitoreadas
 LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
     "Tama": (-30.5058, -66.2952),
-    "Tama Prueba": (-30.50758, -66.54512),
 }
-
 # Límite conservador para las imágenes enviadas como fotos a Telegram.
 # Si la imagen supera este tamaño o no puede descargarse, se intenta
 # publicar el enlace directo en lugar de adjuntar el archivo.
