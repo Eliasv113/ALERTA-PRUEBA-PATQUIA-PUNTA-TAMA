@@ -23,21 +23,53 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependencias
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Diagnosticar configuración
+        run: |
+          echo "======================================"
+          echo " DIAGNÓSTICO DEL SISTEMA DE ALERTAS"
+          echo "======================================"
+
+          echo ""
+          echo "=== REPOSITORIO Y ARCHIVO DE EJECUCIÓN ==="
+          pwd
+          ls -la main.py
+
+          echo ""
+          echo "=== APARICIONES DE BARILOCHE ==="
+          grep -Rni "Bariloche" . \
+            --exclude-dir=.git \
+            --exclude-dir=.venv \
+            || true
+
+          echo ""
+          echo "=== CONFIGURACIÓN LOCALIDADES EN main.py ==="
+          grep -n -A20 '^LOCALIDADES' main.py || true
+
+          echo ""
+          echo "=== WORKFLOWS DISPONIBLES ==="
+          find .github/workflows -maxdepth 1 -type f -print
 
       - name: Consultar el SMN y enviar alertas
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
-        run: python main.py
+        run: python -u main.py
 
       - name: Guardar historial
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add historial_alertas.json
+
           if ! git diff --cached --quiet; then
             git commit -m "Actualizar historial de alertas"
             git push
+          else
+            echo "No hay cambios en el historial."
           fi
