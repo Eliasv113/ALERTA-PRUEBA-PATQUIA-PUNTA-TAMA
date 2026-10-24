@@ -24,14 +24,28 @@ CHAT_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 
 ZONA_HORARIA = ZoneInfo("America/Argentina/Buenos_Aires")
 
-# Localidades monitoreadas. Se conserva la configuración más reciente
-# del archivo recibido, que incluye San Carlos de Bariloche.
-# Localidades monitoreadas
+# Lista permitida de localidades monitoreadas.
+# Si se cambia esta lista, también hay que actualizar LOCALIDADES_PERMITIDAS.
+LOCALIDADES_PERMITIDAS = {
+    "Patquía",
+    "Punta de los Llanos",
+    "Tama",
+}
+
 LOCALIDADES = {
     "Patquía": (-30.0468, -66.8823),
     "Punta de los Llanos": (-30.1455, -66.5262),
     "Tama": (-30.5058, -66.2952),
 }
+
+# Protección: evita ejecutar el sistema si se agregó accidentalmente
+# una localidad distinta de las tres autorizadas.
+if set(LOCALIDADES) != LOCALIDADES_PERMITIDAS:
+    raise RuntimeError(
+        "La configuración de LOCALIDADES no coincide con la lista permitida. "
+        f"Configuradas: {sorted(LOCALIDADES)}; "
+        f"permitidas: {sorted(LOCALIDADES_PERMITIDAS)}"
+    )
 # Límite conservador para las imágenes enviadas como fotos a Telegram.
 # Si la imagen supera este tamaño o no puede descargarse, se intenta
 # publicar el enlace directo en lugar de adjuntar el archivo.
@@ -717,9 +731,16 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
             # alguna localidad monitoreada, no solo del primer bloque <info>.
             recursos_encontrados.extend(extraer_recursos(info, url_cap))
 
+    # Segunda barrera: solo se permiten las localidades configuradas.
+    # Nunca se debe enviar una alerta si no coincide con estas tres.
+    localidades.intersection_update(LOCALIDADES_PERMITIDAS)
+
     if not localidades or info_elegida is None:
-        print(f"Sin coincidencias geográficas: {identificador}")
+        print(f"Sin coincidencias geográficas con las localidades permitidas: {identificador}")
         return
+
+    # Registro explícito para auditar exactamente qué localidades pasarán al mensaje.
+    print(f"Localidades autorizadas detectadas para {identificador}: {', '.join(sorted(localidades))}")
 
     # Evita descargar dos veces un mismo recurso si figura en varios bloques.
     recursos_unicos = []
@@ -813,6 +834,14 @@ def enlaces_cap(contenido):
 def ejecutar():
     validar_configuracion_telegram()
 
+    print("=" * 60)
+    print("SISTEMA DE ALERTAS SMN — CONFIGURACIÓN EN EJECUCIÓN")
+    print(f"Repositorio/commit: {os.getenv('GITHUB_REPOSITORY', 'ejecución local')} / {os.getenv('GITHUB_SHA', 'sin SHA de GitHub')}")
+    print(f"Workflow: {os.getenv('GITHUB_WORKFLOW', 'no informado')}")
+    print(f"Rama/ref: {os.getenv('GITHUB_REF', 'no informado')}")
+    print(f"Localidades autorizadas: {', '.join(sorted(LOCALIDADES_PERMITIDAS))}")
+    print("=" * 60)
+
     historial = cargar_historial()
     claves_procesadas = set()
 
@@ -860,4 +889,3 @@ def ejecutar():
 
 
 if __name__ == "__main__":
-    ejecutar()
