@@ -831,6 +831,303 @@ def enlaces_cap(contenido):
     return list(dict.fromkeys(enlaces))
 
 
+
+# =========================================================
+# AVISOS METEOROLÓGICOS A MUY CORTO PLAZO (GEORSS)
+# =========================================================
+
+GEORSS_URL = "https://ssl.smn.gob.ar/feeds/avisocorto_GeoRSS.xml"
+MAX_BYTES_GIF = 9_500_000
+
+
+class ExtractorImagenesHTML(__import__("html.parser", fromlist=["HTMLParser"]).HTMLParser):
+    """Extrae los src de las imágenes publicadas en la descripción GeoRSS."""
+
+    def __init__(self):
+        super().__init__()
+        self.urls = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "img":
+            return
+        atributos = dict(attrs)
+        src = atributos.get("src", "").strip()
+        if src and url_http_valida(src):
+            self.urls.append(src)
+
+
+def normalizar_texto(valor):
+    """Normaliza texto para comparar departamentos sin diferencias de acentos."""
+    import unicodedata
+    valor = html.unescape(valor or "")
+    valor = unicodedata.normalize("NFD", valor)
+    valor = "".join(c for c in valor if unicodedata.category(c) != "Mn")
+    return " ".join(valor.lower().replace(".", " ").replace(",", " ").split())
+
+
+def localidades_georss(descripcion):
+    """Relaciona exclusivamente los dos departamentos autorizados con las localidades."""
+    limpio = normalizar_texto(__import__("re").sub(r"<[^>]+>", " ", descripcion))
+    afectadas = set()
+
+    # Patquía pertenece al departamento Independencia.
+    if __import__("re").search(r"\bindependencia\b", limpio):
+        afectadas.add("Patquía")
+
+    # Punta de los Llanos y Tama pertenecen al departamento General Ángel
+    # Vicente Peñaloza. Se aceptan abreviaturas habituales del SMN.
+    patrones_penaloza = (
+        r"\bgeneral\s+angel\s+vicente\s+penaloza\b",
+        r"\bgral\s+angel\s+vicente\s+penaloza\b",
+        r"\bgral\s+angel\s+v\s+penaloza\b",
+        r"\bgeneral\s+a\s+v\s+penaloza\b",
+        r"\bgral\s+a\s+v\s+penaloza\b",
+    )
+    if any(__import__("re").search(patron, limpio) for patron in patrones_penaloza):
+        afectadas.update({"Punta de los Llanos", "Tama"})
+
+    return afectadas.intersection(LOCALIDADES_PERMITIDAS)
+
+
+def extraer_urls_imagenes_georss(descripcion):
+    extractor = ExtractorImagenesHTML()
+    try:
+        extractor.feed(descripcion or "")
+    except Exception as error:
+        print(f"No se pudieron interpretar las imágenes del GeoRSS: {error}")
+    # Conserva el orden y evita duplicados.
+    return list(dict.fromkeys(extractor.urls))
+
+
+def descargar_archivo(url):
+    """Descarga un recurso SMN con un límite de tamaño estricto."""
+    if not url_http_valida(url):
+        return None
+    try:
+        with requests.get(
+            url, headers=CABECERAS_HTTP, timeout=TIMEOUT_DESCARGA_IMAGEN,
+            stream=True, allow_redirects=True
+        ) as respuesta:
+            respuesta.raise_for_status()
+            partes = []
+            total = 0
+            for bloque in respuesta.iter_content(chunk_size=64 * 1024):
+                if not bloque:
+                    continue
+                total += len(bloque)
+                if total > MAX_BYTES_GIF:
+                    print(f"Recurso SMN demasiado grande: {url}")
+                    return None
+                partes.append(bloque)
+            return b"".join(partes)
+    except (requests.RequestException, OSError, ValueError) as error:
+        print(f"No se pudo descargar el recurso SMN {url}: {error}")
+        return None
+
+
+def leer_validez_grafico(datos, fecha_emision):
+    """
+    Lee la validez del aviso oficial con Tesseract.
+    Si no puede identificarla, no inventa una duración ni una hora de cierre.
+    """
+    import re
+    import subprocess
+    import tempfile
+
+    if not datos:
+        return "No se pudo leer la validez en el gráfico oficial.", None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".gif") as temporal:
+            temporal.write(datos)
+            temporal.flush()
+            resultado = subprocess.run(
+                ["tesseract", temporal.name, "stdout", "-l", "spa+eng"],
+                capture_output=True, text=True, timeout=25, check=False
+            )
+        texto_ocr = normalizar_texto(resultado.stdout)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"No se pudo ejecutar OCR sobre el aviso: {error}")
+        return "No se pudo leer la validez en el gráfico oficial.", None
+
+    # Duraciones escritas en letras o números: una/dos/tres horas desde emisión.
+    duraciones = [
+        (r"(?:una|1)\s*(?:\(\s*1\s*\))?\s*hora(?:s)?\s+desde\s+la\s+emision", 1),
+        (r"(?:dos|2)\s*(?:\(\s*2\s*\))?\s*hora(?:s)?\s+desde\s+la\s+emision", 2),
+        (r"(?:tres|3)\s*(?:\(\s*3\s*\))?\s*hora(?:s)?\s+desde\s+la\s+emision", 3),
+        (r"(?:cuatro|4)\s*(?:\(\s*4\s*\))?\s*hora(?:s)?\s+desde\s+la\s+emision", 4),
+        (r"(?:seis|6)\s*(?:\(\s*6\s*\))?\s*hora(?:s)?\s+desde\s+la\s+emision", 6),
+    ]
+
+    for patron, horas in duraciones:
+        if re.search(patron, texto_ocr):
+            if fecha_emision is None:
+                return f"Validez: {horas} hora(s) desde la emisión.", None
+            fin = fecha_emision + __import__("datetime").timedelta(hours=horas)
+            return (
+                f"Validez: {horas} hora(s) desde la emisión. "
+                f"Válido hasta las {fin:%H:%M} (hora argentina).",
+                fin
+            )
+
+    # Respaldo para una hora exacta impresa en el gráfico.
+    coincidencia = re.search(
+        r"(?:valido\s+hasta|validez\s+hasta|hasta)\s*(?:las)?\s*(\d{1,2})[:.](\d{2})",
+        texto_ocr
+    )
+    if coincidencia:
+        hora, minuto = map(int, coincidencia.groups())
+        if 0 <= hora <= 23 and 0 <= minuto <= 59 and fecha_emision:
+            fin = fecha_emision.replace(hour=hora, minute=minuto, second=0, microsecond=0)
+            if fin < fecha_emision:
+                fin += __import__("datetime").timedelta(days=1)
+            return f"Válido hasta las {hora:02d}:{minuto:02d} (hora argentina).", fin
+
+    print("OCR del gráfico SMN (sin validez reconocible):", resultado.stdout[:500])
+    return "Validez: no se pudo identificar en el gráfico oficial.", None
+
+
+def fecha_emision_georss(valor):
+    if not valor:
+        return None
+    try:
+        fecha = datetime.fromisoformat(valor.strip().replace("Z", "+00:00"))
+        if fecha.tzinfo is None:
+            fecha = fecha.replace(tzinfo=timezone.utc)
+        return fecha.astimezone(ZONA_HORARIA)
+    except (ValueError, TypeError):
+        return None
+
+
+def fenomeno_georss(descripcion):
+    """Extrae el fenómeno del fragmento HTML de descripción."""
+    import re
+    texto_plano = html.unescape(re.sub(r"<[^>]+>", " ", descripcion or ""))
+    texto_plano = " ".join(texto_plano.split())
+    coincidencia = re.search(
+        r"(?:por ocurrencia de|por)\s+(.+?)(?:\.|$)",
+        texto_plano, flags=re.IGNORECASE
+    )
+    return coincidencia.group(1).strip().rstrip(".") if coincidencia else "Fenómeno indicado por el SMN"
+
+
+def enviar_documento_georss(url, datos, numero, indice):
+    """Envía cada GIF original como documento para conservar su animación."""
+    if not datos:
+        return False
+    nombre = os.path.basename(urlparse(url).path) or f"aviso_smn_{indice}.gif"
+    nombre = nombre.split("?")[0][:100]
+    respuesta = requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/sendDocument",
+        data={
+            "chat_id": CHAT_ID,
+            "caption": f"🖼️ Gráfico oficial del SMN — Aviso N° {html.escape(numero)} ({indice}/2)",
+        },
+        files={"document": (nombre, datos, "image/gif")},
+        timeout=45
+    )
+    respuesta_telegram_correcta(respuesta)
+    print(f"Gráfico oficial adjuntado: {nombre}")
+    return True
+
+
+def procesar_georss(contenido, historial, claves_procesadas):
+    """Procesa ACP del GeoRSS, solo para las tres localidades permitidas."""
+    raiz = ET.fromstring(contenido)
+
+    for item in raiz.iter():
+        if nombre_etiqueta(item) != "item":
+            continue
+
+        titulo = texto(item, "title", "")
+        descripcion = texto(item, "description", "")
+        fecha_xml = texto(item, "date", "")
+        if not fecha_xml or fecha_xml == "No especificada":
+            # dc:date puede tener un namespace; texto() ya compara el nombre local.
+            fecha_xml = texto(item, "date", "")
+
+        afectadas = localidades_georss(descripcion)
+        if not afectadas:
+            print(f"ACP sin coincidencia con las localidades autorizadas: {titulo}")
+            continue
+
+        import re
+        numero_match = re.search(r"N[°º]\s*(\d+)", titulo, flags=re.IGNORECASE)
+        numero = numero_match.group(1) if numero_match else titulo.strip()
+        fecha = fecha_emision_georss(fecha_xml)
+
+        # El número y la fecha de emisión distinguen avisos sucesivos del mismo fenómeno.
+        clave = hashlib.sha256(
+            f"GEORSS|{numero}|{fecha_xml}".encode("utf-8")
+        ).hexdigest()
+        if clave in historial or clave in claves_procesadas:
+            print(f"ACP ya notificado: N° {numero}")
+            continue
+
+        urls = extraer_urls_imagenes_georss(descripcion)
+        # El SMN publica dos gráficos: avi_gral.gif y aviso.gif.
+        # Conservamos ambos enlaces originales y el orden de publicación.
+        urls = urls[:2]
+        if len(urls) < 2:
+            print(f"Advertencia: el ACP N° {numero} no contiene dos imágenes.")
+        
+        graficos = []
+        for url in urls:
+            datos = descargar_archivo(url)
+            graficos.append({"url": url, "datos": datos})
+
+        # OCR sobre el gráfico principal, con el segundo como respaldo.
+        datos_ocr = next(
+            (g["datos"] for g in graficos if g["url"].lower().endswith("aviso.gif") and g["datos"]),
+            None
+        )
+        if not datos_ocr:
+            datos_ocr = next((g["datos"] for g in graficos if g["datos"]), None)
+
+        validez, _ = leer_validez_grafico(datos_ocr, fecha)
+        fecha_texto = (
+            fecha.strftime("%d de ") + MESES[fecha.month - 1] + fecha.strftime(" de %Y - %H:%M")
+            if fecha else (fecha_xml or "No informada")
+        )
+        fenomeno = html.escape(fenomeno_georss(descripcion))
+        lineas = [
+            "🚨 <b>URGENTE</b>",
+            "<b>AVISO METEOROLÓGICO A CORTO PLAZO</b>",
+            "",
+            f"📍 <b>Localidades:</b> {html.escape(', '.join(sorted(afectadas)))}",
+            f"🌩️ <b>Fenómeno:</b> {fenomeno}",
+            f"🕒 <b>Emitido:</b> {html.escape(fecha_texto)}",
+            f"⏳ <b>{html.escape(validez)}</b>",
+            "",
+            "<i>Fuente: Servicio Meteorológico Nacional (SMN).</i>",
+        ]
+        mensaje = "\n".join(lineas)
+
+        # Enviar primero el aviso textual; luego intentar adjuntar cada gráfico.
+        enviar_telegram(mensaje)
+        for indice, grafico in enumerate(graficos, start=1):
+            if not grafico["datos"]:
+                print(f"No se pudo adjuntar el gráfico {indice} del ACP N° {numero}.")
+                continue
+            try:
+                enviar_documento_georss(grafico["url"], grafico["datos"], numero, indice)
+            except (requests.RequestException, RuntimeError, ValueError) as error:
+                print(f"Falló el envío del gráfico {indice} del ACP N° {numero}: {error}")
+
+        # Se marca como procesado después de confirmar el mensaje principal.
+        historial.add(clave)
+        claves_procesadas.add(clave)
+        guardar_historial(historial)
+        print(f"ACP N° {numero} enviado para: {', '.join(sorted(afectadas))}")
+
+
+def consultar_georss(historial, claves_procesadas):
+    print("Consultando avisos a corto plazo GeoRSS del SMN...")
+    respuesta = requests.get(GEORSS_URL, timeout=30)
+    respuesta.raise_for_status()
+    procesar_georss(respuesta.content, historial, claves_procesadas)
+
+
 def ejecutar():
     validar_configuracion_telegram()
 
@@ -861,6 +1158,7 @@ def ejecutar():
             claves_procesadas,
             url_cap=respuesta.url or RSS_URL,
         )
+        consultar_georss(historial, claves_procesadas)
         return
 
     if not enlaces:
@@ -884,6 +1182,11 @@ def ejecutar():
 
         except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
             print(f"Error al procesar {enlace}: {error}")
+
+    try:
+        consultar_georss(historial, claves_procesadas)
+    except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
+        print(f"Error al consultar el GeoRSS de avisos a corto plazo: {error}")
 
     print("Consulta finalizada.")
 
