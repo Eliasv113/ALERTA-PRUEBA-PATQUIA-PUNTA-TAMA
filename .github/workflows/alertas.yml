@@ -2,7 +2,7 @@ name: Alertas meteorologicas del SMN
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -17,6 +17,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Instalar Tesseract OCR para leer la validez de los avisos SMN
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
+
       - name: Descargar el repositorio
         uses: actions/checkout@v4
         with:
