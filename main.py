@@ -1162,7 +1162,11 @@ def ejecutar():
         return
 
     if not enlaces:
-        print("El feed no contiene enlaces CAP reconocibles.")
+        print("El feed CAP no contiene enlaces reconocibles; se continuará con GeoRSS.")
+        try:
+            consultar_georss(historial, claves_procesadas)
+        except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
+            print(f"Error al consultar el GeoRSS de avisos a corto plazo: {error}")
         return
 
     for enlace in enlaces:
