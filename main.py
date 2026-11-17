@@ -692,6 +692,7 @@ def construir_mensaje(alerta, info, localidades, recursos_sin_adjunto=None):
 # =========================================================
 
 def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
+    """Procesa una alerta CAP y entrega primero el texto, sin esperar imágenes."""
     raiz = ET.fromstring(contenido)
 
     if nombre_etiqueta(raiz) != "alert":
@@ -700,13 +701,11 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
 
     identificador = texto(raiz, "identifier", "")
     enviado = texto(raiz, "sent", "")
-
     if not identificador:
         print("Se encontró una alerta sin identificador; se omite.")
         return
 
     clave = clave_alerta(identificador, enviado)
-
     if clave in historial or clave in claves_procesadas:
         print(f"Alerta ya notificada: {identificador}")
         return
@@ -717,84 +716,55 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
 
     for info in todos_hijos(raiz, "info"):
         localidades_info = set()
-
         for area in todos_hijos(info, "area"):
             localidades_info.update(localidades_afectadas(area))
 
         if localidades_info:
             localidades.update(localidades_info)
-
             if info_elegida is None:
                 info_elegida = info
-
-            # Se recopilan recursos de cada bloque informativo que afecte a
-            # alguna localidad monitoreada, no solo del primer bloque <info>.
             recursos_encontrados.extend(extraer_recursos(info, url_cap))
 
-    # Segunda barrera: solo se permiten las localidades configuradas.
-    # Nunca se debe enviar una alerta si no coincide con estas tres.
     localidades.intersection_update(LOCALIDADES_PERMITIDAS)
-
     if not localidades or info_elegida is None:
         print(f"Sin coincidencias geográficas con las localidades permitidas: {identificador}")
         return
 
-    # Registro explícito para auditar exactamente qué localidades pasarán al mensaje.
     print(f"Localidades autorizadas detectadas para {identificador}: {', '.join(sorted(localidades))}")
 
-    # Evita descargar dos veces un mismo recurso si figura en varios bloques.
+    # PRIMERO: entregar la alerta textual. No descargar gráficos antes de avisar.
+    mensaje = construir_mensaje(raiz, info_elegida, localidades)
+    enviar_telegram(mensaje)
+
+    # El historial se guarda inmediatamente tras confirmar el envío del texto.
+    historial.add(clave)
+    claves_procesadas.add(clave)
+    guardar_historial(historial)
+
+    # DESPUÉS: adjuntar recursos. Los fallos gráficos no retrasan ni anulan el aviso.
     recursos_unicos = []
     vistos = set()
     for recurso in recursos_encontrados:
         clave_recurso = recurso.get("url") or (
             recurso.get("descripcion"), len(recurso.get("datos") or b"")
         )
-        if clave_recurso in vistos:
-            continue
-        vistos.add(clave_recurso)
-        recursos_unicos.append(recurso)
+        if clave_recurso not in vistos:
+            vistos.add(clave_recurso)
+            recursos_unicos.append(recurso)
 
-    recursos_preparados = [
-        preparar_recurso_grafico(recurso)
-        for recurso in recursos_unicos
-    ]
-
-    # Primero se envía el mensaje principal. Los recursos no descargables se
-    # adjuntan como enlaces para no perderlos si la fuente publica una imagen
-    # con restricciones de acceso o un formato no admitido por Telegram.
-    recursos_sin_adjunto = [
-        recurso for recurso in recursos_preparados
-        if not recurso.get("datos") and recurso.get("url")
-    ]
-
-    mensaje = construir_mensaje(
-        raiz,
-        info_elegida,
-        localidades,
-        recursos_sin_adjunto=recursos_sin_adjunto,
-    )
-    enviar_telegram(mensaje)
-
-    # Las fotografías se envían en mensajes separados para no chocar con el
-    # límite de longitud del texto/caption de Telegram.
-    for recurso in recursos_preparados:
-        if not recurso.get("datos"):
-            continue
+    for recurso in recursos_unicos:
+        preparado = preparar_recurso_grafico(recurso)
+        if preparado.get("datos"):
+            try:
+                enviar_foto_telegram(preparado)
+                continue
+            except (requests.RequestException, RuntimeError, ValueError) as error:
+                print(f"No se pudo adjuntar una imagen del SMN: {error}")
 
         try:
-            enviar_foto_telegram(recurso)
+            enviar_enlace_recurso(preparado)
         except (requests.RequestException, RuntimeError, ValueError) as error:
-            print(f"No se pudo adjuntar una imagen del SMN: {error}")
-            # Si la subida falla, igualmente se intenta entregar el enlace.
-            try:
-                enviar_enlace_recurso(recurso)
-            except (requests.RequestException, RuntimeError, ValueError) as error_enlace:
-                print(f"Tampoco se pudo enviar el enlace del recurso: {error_enlace}")
-
-    # Se registra después de confirmar el envío del mensaje de alerta.
-    historial.add(clave)
-    claves_procesadas.add(clave)
-    guardar_historial(historial)
+            print(f"No se pudo enviar el enlace del recurso: {error}")
 
 
 # =========================================================
@@ -1130,74 +1100,57 @@ def consultar_georss(historial, claves_procesadas):
 
 def ejecutar():
     validar_configuracion_telegram()
+    inicio_ejecucion = datetime.now(timezone.utc)
 
     print("=" * 60)
-    print("SISTEMA DE ALERTAS SMN — CONFIGURACIÓN EN EJECUCIÓN")
-    print(f"Repositorio/commit: {os.getenv('GITHUB_REPOSITORY', 'ejecución local')} / {os.getenv('GITHUB_SHA', 'sin SHA de GitHub')}")
-    print(f"Workflow: {os.getenv('GITHUB_WORKFLOW', 'no informado')}")
-    print(f"Rama/ref: {os.getenv('GITHUB_REF', 'no informado')}")
-    print(f"Localidades autorizadas: {', '.join(sorted(LOCALIDADES_PERMITIDAS))}")
+    print("SISTEMA DE ALERTAS SMN — CAP PRIORITARIO")
+    print(f"Inicio UTC: {inicio_ejecucion.isoformat()}")
+    print(f"Localidades: {', '.join(sorted(LOCALIDADES_PERMITIDAS))}")
     print("=" * 60)
 
     historial = cargar_historial()
     claves_procesadas = set()
 
-    # PRIORIDAD: consultar primero los avisos a muy corto plazo.
-    # El feed CAP general puede contener muchos enlaces y provocar HTTP 429
-    # si se descargan todos antes del GeoRSS.
+    # El canal CAP oficial es la fuente principal y único circuito de alertas.
+    # No se consulta GeoRSS como un segundo circuito para evitar duplicados.
     try:
-        consultar_georss(historial, claves_procesadas)
-    except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
-        print(f"Error al consultar el GeoRSS de avisos a corto plazo: {error}")
-
-    print("Consultando el feed general de alertas CAP del SMN...")
-
-    try:
-        respuesta = requests.get(RSS_URL, timeout=30)
-        respuesta.raise_for_status()
-    except requests.RequestException as error:
-        print(f"No se pudo consultar el feed general CAP: {error}")
-        print("Consulta finalizada; los avisos a corto plazo ya fueron consultados.")
-        return
-
-    enlaces = enlaces_cap(respuesta.content)
-    raiz = ET.fromstring(respuesta.content)
-
-    # Permite procesar directamente un XML CAP si el servidor lo devuelve.
-    if nombre_etiqueta(raiz) == "alert":
-        procesar_cap(
-            respuesta.content,
-            historial,
-            claves_procesadas,
-            url_cap=respuesta.url or RSS_URL,
+        respuesta = requests.get(
+            RSS_URL,
+            headers={"User-Agent": "SMN-AlertasTelegram/1.0", "Cache-Control": "no-cache"},
+            timeout=(5, 15),
         )
-        print("Consulta finalizada.")
-        return
+        respuesta.raise_for_status()
+        enlaces = enlaces_cap(respuesta.content)
+        raiz = ET.fromstring(respuesta.content)
 
-    if not enlaces:
-        print("El feed CAP no contiene enlaces reconocibles.")
-        print("Consulta finalizada.")
-        return
+        if nombre_etiqueta(raiz) == "alert":
+            procesar_cap(respuesta.content, historial, claves_procesadas, url_cap=respuesta.url or RSS_URL)
+        else:
+            print(f"Feed CAP recibido: {len(enlaces)} enlaces. Procesando documentos...")
+            for enlace in enlaces:
+                try:
+                    url_cap = urljoin(respuesta.url or RSS_URL, enlace)
+                    respuesta_cap = requests.get(
+                        url_cap,
+                        headers={"User-Agent": "SMN-AlertasTelegram/1.0", "Cache-Control": "no-cache"},
+                        timeout=(5, 12),
+                    )
+                    respuesta_cap.raise_for_status()
+                    procesar_cap(
+                        respuesta_cap.content,
+                        historial,
+                        claves_procesadas,
+                        url_cap=respuesta_cap.url or url_cap,
+                    )
+                except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
+                    print(f"Error al procesar documento CAP {enlace}: {error}")
 
-    for enlace in enlaces:
-        try:
-            url_cap = urljoin(respuesta.url or RSS_URL, enlace)
-            print(f"Consultando: {url_cap}")
+    except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
+        print(f"Error al consultar el canal CAP del SMN: {error}")
 
-            respuesta_cap = requests.get(url_cap, timeout=30)
-            respuesta_cap.raise_for_status()
-
-            procesar_cap(
-                respuesta_cap.content,
-                historial,
-                claves_procesadas,
-                url_cap=respuesta_cap.url or url_cap,
-            )
-
-        except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
-            print(f"Error al procesar {enlace}: {error}")
-
-    print("Consulta finalizada.")
+    fin_ejecucion = datetime.now(timezone.utc)
+    print(f"Fin UTC: {fin_ejecucion.isoformat()}")
+    print(f"Duración total: {(fin_ejecucion - inicio_ejecucion).total_seconds():.1f} segundos.")
 
 
 if __name__ == "__main__":
