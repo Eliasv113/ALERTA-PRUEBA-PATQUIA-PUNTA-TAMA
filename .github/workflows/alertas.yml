@@ -1,6 +1,9 @@
 name: Alertas meteorologicas del SMN
 
 on:
+  push:
+    paths:
+      - ".github/workflows/alertas.yml"
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
