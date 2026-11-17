@@ -13,18 +13,13 @@ permissions:
 
 concurrency:
   group: alertas-smn-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   alertas:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Instalar Tesseract OCR para leer la validez de los avisos SMN
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
-
       - name: Descargar el repositorio
         uses: actions/checkout@v4
         with:
@@ -72,7 +67,7 @@ jobs:
           echo "=== REFERENCIAS A EJECUCIONES PYTHON EN WORKFLOWS ==="
           grep -RniE 'python(3)? .*\.py|main\.py|alerta_prueba' .github/workflows || true
 
-      - name: Consultar el SMN y enviar alertas
+      - name: Consultar el canal CAP del SMN y enviar alertas
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
