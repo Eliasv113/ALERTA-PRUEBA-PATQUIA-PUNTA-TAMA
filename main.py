@@ -1142,10 +1142,23 @@ def ejecutar():
     historial = cargar_historial()
     claves_procesadas = set()
 
-    print("Consultando el feed de alertas del SMN...")
+    # PRIORIDAD: consultar primero los avisos a muy corto plazo.
+    # El feed CAP general puede contener muchos enlaces y provocar HTTP 429
+    # si se descargan todos antes del GeoRSS.
+    try:
+        consultar_georss(historial, claves_procesadas)
+    except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
+        print(f"Error al consultar el GeoRSS de avisos a corto plazo: {error}")
 
-    respuesta = requests.get(RSS_URL, timeout=30)
-    respuesta.raise_for_status()
+    print("Consultando el feed general de alertas CAP del SMN...")
+
+    try:
+        respuesta = requests.get(RSS_URL, timeout=30)
+        respuesta.raise_for_status()
+    except requests.RequestException as error:
+        print(f"No se pudo consultar el feed general CAP: {error}")
+        print("Consulta finalizada; los avisos a corto plazo ya fueron consultados.")
+        return
 
     enlaces = enlaces_cap(respuesta.content)
     raiz = ET.fromstring(respuesta.content)
@@ -1158,15 +1171,12 @@ def ejecutar():
             claves_procesadas,
             url_cap=respuesta.url or RSS_URL,
         )
-        consultar_georss(historial, claves_procesadas)
+        print("Consulta finalizada.")
         return
 
     if not enlaces:
-        print("El feed CAP no contiene enlaces reconocibles; se continuará con GeoRSS.")
-        try:
-            consultar_georss(historial, claves_procesadas)
-        except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
-            print(f"Error al consultar el GeoRSS de avisos a corto plazo: {error}")
+        print("El feed CAP no contiene enlaces reconocibles.")
+        print("Consulta finalizada.")
         return
 
     for enlace in enlaces:
@@ -1186,11 +1196,6 @@ def ejecutar():
 
         except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
             print(f"Error al procesar {enlace}: {error}")
-
-    try:
-        consultar_georss(historial, claves_procesadas)
-    except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
-        print(f"Error al consultar el GeoRSS de avisos a corto plazo: {error}")
 
     print("Consulta finalizada.")
 
