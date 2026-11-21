@@ -59,6 +59,56 @@ CABECERAS_HTTP = {
     "Accept": "image/jpeg,image/png,image/webp,image/*,*/*;q=0.8",
 }
 
+CABECERAS_SMN = {
+    "User-Agent": "SMN-AlertasTelegram/1.1 (+monitoreo informativo)",
+    "Accept": "application/xml, text/xml, application/rss+xml, */*;q=0.8",
+    "Cache-Control": "no-cache, no-store, max-age=0",
+    "Pragma": "no-cache",
+}
+
+
+def ahora_utc():
+    return datetime.now(timezone.utc)
+
+
+def registrar_demora_publicacion(fuente, fecha_publicacion):
+    """Registra la diferencia entre la fecha declarada por la fuente y la detección."""
+    if not fecha_publicacion or fecha_publicacion == "No especificada":
+        print(f"[{fuente}] La fuente no informó una fecha de publicación interpretable.")
+        return
+    try:
+        valor = fecha_publicacion.strip().replace("Z", "+00:00")
+        publicada = datetime.fromisoformat(valor)
+        if publicada.tzinfo is None:
+            publicada = publicada.replace(tzinfo=timezone.utc)
+        demora = (ahora_utc() - publicada.astimezone(timezone.utc)).total_seconds()
+        print(
+            f"[{fuente}] Publicación declarada: {publicada.isoformat()} | "
+            f"detectada UTC: {ahora_utc().isoformat()} | "
+            f"antigüedad al detectar: {demora:.1f} segundos"
+        )
+    except (ValueError, TypeError, OverflowError):
+        print(f"[{fuente}] Fecha de publicación sin formato ISO reconocible: {fecha_publicacion}")
+
+
+def consultar_url_smn(url, timeout, nombre_fuente):
+    """Consulta una fuente del SMN y registra tiempos y cabeceras de respuesta."""
+    inicio = ahora_utc()
+    print(f"[{nombre_fuente}] Inicio de consulta UTC: {inicio.isoformat()} | URL: {url}")
+    respuesta = requests.get(url, headers=CABECERAS_SMN, timeout=timeout)
+    fin = ahora_utc()
+    print(
+        f"[{nombre_fuente}] Respuesta HTTP {respuesta.status_code} en "
+        f"{(fin - inicio).total_seconds():.2f} s | "
+        f"Date={respuesta.headers.get('Date', 'no informado')} | "
+        f"Last-Modified={respuesta.headers.get('Last-Modified', 'no informado')} | "
+        f"Age={respuesta.headers.get('Age', 'no informado')} | "
+        f"ETag={respuesta.headers.get('ETag', 'no informado')} | "
+        f"bytes={len(respuesta.content)}"
+    )
+    respuesta.raise_for_status()
+    return respuesta
+
 MESES = [
     "enero", "febrero", "marzo", "abril",
     "mayo", "junio", "julio", "agosto",
@@ -550,6 +600,7 @@ def enviar_telegram(mensaje):
     validar_configuracion_telegram()
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
+    inicio_envio = ahora_utc()
     respuesta = requests.post(
         url,
         data={
@@ -561,8 +612,33 @@ def enviar_telegram(mensaje):
         timeout=30,
     )
 
+    resultado = respuesta_telegram_correcta(respuesta)
+    fin_envio = ahora_utc()
+    print(
+        "Mensaje de alerta enviado correctamente a Telegram | "
+        f"confirmación UTC: {fin_envio.isoformat()} | "
+        f"latencia de envío: {(fin_envio - inicio_envio).total_seconds():.2f} s"
+    )
+    return resultado.get("result", {})
+
+
+def editar_mensaje_telegram(message_id, mensaje):
+    """Actualiza el mensaje inicial ACP cuando termina el OCR, sin retrasar el aviso."""
+    if not message_id:
+        return
+    respuesta = requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/editMessageText",
+        data={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "text": mensaje,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+        timeout=30,
+    )
     respuesta_telegram_correcta(respuesta)
-    print("Mensaje de alerta enviado correctamente a Telegram.")
+    print("Mensaje ACP actualizado con la validez reconocida por OCR.")
 
 
 def enviar_foto_telegram(recurso):
@@ -701,6 +777,7 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
 
     identificador = texto(raiz, "identifier", "")
     enviado = texto(raiz, "sent", "")
+    registrar_demora_publicacion("CAP", enviado)
     if not identificador:
         print("Se encontró una alerta sin identificador; se omite.")
         return
@@ -1002,20 +1079,23 @@ def enviar_documento_georss(url, datos, numero, indice):
 
 
 def procesar_georss(contenido, historial, claves_procesadas):
-    """Procesa ACP del GeoRSS, solo para las tres localidades permitidas."""
+    """Procesa ACP del GeoRSS y envía el texto antes de descargar/OCR de imágenes."""
     raiz = ET.fromstring(contenido)
+    total_items = 0
+    nuevos = 0
 
     for item in raiz.iter():
         if nombre_etiqueta(item) != "item":
             continue
+        total_items += 1
 
         titulo = texto(item, "title", "")
         descripcion = texto(item, "description", "")
         fecha_xml = texto(item, "date", "")
         if not fecha_xml or fecha_xml == "No especificada":
-            # dc:date puede tener un namespace; texto() ya compara el nombre local.
             fecha_xml = texto(item, "date", "")
 
+        registrar_demora_publicacion("GeoRSS-ACP", fecha_xml)
         afectadas = localidades_georss(descripcion)
         if not afectadas:
             print(f"ACP sin coincidencia con las localidades autorizadas: {titulo}")
@@ -1026,7 +1106,7 @@ def procesar_georss(contenido, historial, claves_procesadas):
         numero = numero_match.group(1) if numero_match else titulo.strip()
         fecha = fecha_emision_georss(fecha_xml)
 
-        # El número y la fecha de emisión distinguen avisos sucesivos del mismo fenómeno.
+        # El número y la fecha distinguen avisos sucesivos del mismo fenómeno.
         clave = hashlib.sha256(
             f"GEORSS|{numero}|{fecha_xml}".encode("utf-8")
         ).hexdigest()
@@ -1034,32 +1114,14 @@ def procesar_georss(contenido, historial, claves_procesadas):
             print(f"ACP ya notificado: N° {numero}")
             continue
 
-        urls = extraer_urls_imagenes_georss(descripcion)
-        # El SMN publica dos gráficos: avi_gral.gif y aviso.gif.
-        # Conservamos ambos enlaces originales y el orden de publicación.
-        urls = urls[:2]
-        if len(urls) < 2:
-            print(f"Advertencia: el ACP N° {numero} no contiene dos imágenes.")
-        
-        graficos = []
-        for url in urls:
-            datos = descargar_archivo(url)
-            graficos.append({"url": url, "datos": datos})
-
-        # OCR sobre el gráfico principal, con el segundo como respaldo.
-        datos_ocr = next(
-            (g["datos"] for g in graficos if g["url"].lower().endswith("aviso.gif") and g["datos"]),
-            None
-        )
-        if not datos_ocr:
-            datos_ocr = next((g["datos"] for g in graficos if g["datos"]), None)
-
-        validez, _ = leer_validez_grafico(datos_ocr, fecha)
         fecha_texto = (
             fecha.strftime("%d de ") + MESES[fecha.month - 1] + fecha.strftime(" de %Y - %H:%M")
             if fecha else (fecha_xml or "No informada")
         )
         fenomeno = html.escape(fenomeno_georss(descripcion))
+
+        # PRIMERO: enviar la notificación mínima inmediatamente. No esperar imágenes ni OCR.
+        validez_inicial = "Validez: consultar los gráficos oficiales adjuntos."
         lineas = [
             "🚨 <b>URGENTE</b>",
             "<b>AVISO METEOROLÓGICO A CORTO PLAZO</b>",
@@ -1067,14 +1129,50 @@ def procesar_georss(contenido, historial, claves_procesadas):
             f"📍 <b>Localidades:</b> {html.escape(', '.join(sorted(afectadas)))}",
             f"🌩️ <b>Fenómeno:</b> {fenomeno}",
             f"🕒 <b>Emitido:</b> {html.escape(fecha_texto)}",
-            f"⏳ <b>{html.escape(validez)}</b>",
+            f"⏳ <b>{html.escape(validez_inicial)}</b>",
             "",
             "<i>Fuente: Servicio Meteorológico Nacional (SMN).</i>",
         ]
         mensaje = "\n".join(lineas)
+        resultado_telegram = enviar_telegram(mensaje)
+        message_id = resultado_telegram.get("message_id") if isinstance(resultado_telegram, dict) else None
 
-        # Enviar primero el aviso textual; luego intentar adjuntar cada gráfico.
-        enviar_telegram(mensaje)
+        # Guardar el aviso apenas Telegram confirma el mensaje principal: un fallo de imágenes
+        # no debe provocar que la alerta se repita en la siguiente ejecución.
+        historial.add(clave)
+        claves_procesadas.add(clave)
+        guardar_historial(historial)
+        nuevos += 1
+        print(f"ACP N° {numero}: texto enviado para {', '.join(sorted(afectadas))}.")
+
+        # DESPUÉS: descargar los dos GIF oficiales, conservar su animación y ejecutar OCR.
+        urls = extraer_urls_imagenes_georss(descripcion)[:2]
+        if len(urls) < 2:
+            print(f"Advertencia: el ACP N° {numero} no contiene dos imágenes.")
+
+        graficos = []
+        for url in urls:
+            datos = descargar_archivo(url)
+            graficos.append({"url": url, "datos": datos})
+
+        datos_ocr = next(
+            (g["datos"] for g in graficos if g["url"].lower().endswith("aviso.gif") and g["datos"]),
+            None,
+        )
+        if not datos_ocr:
+            datos_ocr = next((g["datos"] for g in graficos if g["datos"]), None)
+
+        validez, _ = leer_validez_grafico(datos_ocr, fecha)
+        if message_id and validez not in {
+            "Validez: no se pudo identificar en el gráfico oficial.",
+            "No se pudo leer la validez en el gráfico oficial.",
+        }:
+            lineas[6] = f"⏳ <b>{html.escape(validez)}</b>"
+            try:
+                editar_mensaje_telegram(message_id, "\n".join(lineas))
+            except (requests.RequestException, RuntimeError, ValueError) as error:
+                print(f"No se pudo actualizar la validez del ACP N° {numero}: {error}")
+
         for indice, grafico in enumerate(graficos, start=1):
             if not grafico["datos"]:
                 print(f"No se pudo adjuntar el gráfico {indice} del ACP N° {numero}.")
@@ -1084,58 +1182,59 @@ def procesar_georss(contenido, historial, claves_procesadas):
             except (requests.RequestException, RuntimeError, ValueError) as error:
                 print(f"Falló el envío del gráfico {indice} del ACP N° {numero}: {error}")
 
-        # Se marca como procesado después de confirmar el mensaje principal.
-        historial.add(clave)
-        claves_procesadas.add(clave)
-        guardar_historial(historial)
-        print(f"ACP N° {numero} enviado para: {', '.join(sorted(afectadas))}")
+    print(f"GeoRSS: {total_items} elemento(s) revisado(s), {nuevos} ACP nuevo(s) enviado(s).")
 
 
 def consultar_georss(historial, claves_procesadas):
     print("Consultando avisos a corto plazo GeoRSS del SMN...")
-    respuesta = requests.get(GEORSS_URL, timeout=30)
-    respuesta.raise_for_status()
+    respuesta = consultar_url_smn(GEORSS_URL, timeout=(5, 20), nombre_fuente="GeoRSS")
     procesar_georss(respuesta.content, historial, claves_procesadas)
 
 
 def ejecutar():
     validar_configuracion_telegram()
-    inicio_ejecucion = datetime.now(timezone.utc)
+    inicio_ejecucion = ahora_utc()
 
-    print("=" * 60)
-    print("SISTEMA DE ALERTAS SMN — CAP PRIORITARIO")
+    print("=" * 68)
+    print("SISTEMA DE ALERTAS SMN — CAP + ACP GEORSS")
     print(f"Inicio UTC: {inicio_ejecucion.isoformat()}")
+    print(f"Inicio Argentina: {inicio_ejecucion.astimezone(ZONA_HORARIA).isoformat()}")
     print(f"Localidades: {', '.join(sorted(LOCALIDADES_PERMITIDAS))}")
-    print("=" * 60)
+    print("Fuentes habilitadas: CAP y GeoRSS ACP")
+    print("=" * 68)
 
     historial = cargar_historial()
     claves_procesadas = set()
 
-    # El canal CAP oficial es la fuente principal y único circuito de alertas.
-    # No se consulta GeoRSS como un segundo circuito para evitar duplicados.
+    # GeoRSS ACP se procesa primero porque contiene avisos de muy corto plazo.
+    # CAP se consulta después. Una caída de una fuente no impide consultar la otra.
     try:
-        respuesta = requests.get(
-            RSS_URL,
-            headers={"User-Agent": "SMN-AlertasTelegram/1.0", "Cache-Control": "no-cache"},
-            timeout=(5, 15),
-        )
-        respuesta.raise_for_status()
+        consultar_georss(historial, claves_procesadas)
+    except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
+        print(f"ERROR consultando GeoRSS ACP del SMN: {error}")
+
+    try:
+        respuesta = consultar_url_smn(RSS_URL, timeout=(5, 15), nombre_fuente="CAP-RSS")
         enlaces = enlaces_cap(respuesta.content)
         raiz = ET.fromstring(respuesta.content)
 
         if nombre_etiqueta(raiz) == "alert":
-            procesar_cap(respuesta.content, historial, claves_procesadas, url_cap=respuesta.url or RSS_URL)
+            procesar_cap(
+                respuesta.content,
+                historial,
+                claves_procesadas,
+                url_cap=respuesta.url or RSS_URL,
+            )
         else:
             print(f"Feed CAP recibido: {len(enlaces)} enlaces. Procesando documentos...")
             for enlace in enlaces:
                 try:
                     url_cap = urljoin(respuesta.url or RSS_URL, enlace)
-                    respuesta_cap = requests.get(
+                    respuesta_cap = consultar_url_smn(
                         url_cap,
-                        headers={"User-Agent": "SMN-AlertasTelegram/1.0", "Cache-Control": "no-cache"},
                         timeout=(5, 12),
+                        nombre_fuente="Documento-CAP",
                     )
-                    respuesta_cap.raise_for_status()
                     procesar_cap(
                         respuesta_cap.content,
                         historial,
@@ -1144,13 +1243,14 @@ def ejecutar():
                     )
                 except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
                     print(f"Error al procesar documento CAP {enlace}: {error}")
-
     except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
-        print(f"Error al consultar el canal CAP del SMN: {error}")
+        print(f"ERROR consultando el canal CAP del SMN: {error}")
 
-    fin_ejecucion = datetime.now(timezone.utc)
+    fin_ejecucion = ahora_utc()
     print(f"Fin UTC: {fin_ejecucion.isoformat()}")
+    print(f"Fin Argentina: {fin_ejecucion.astimezone(ZONA_HORARIA).isoformat()}")
     print(f"Duración total: {(fin_ejecucion - inicio_ejecucion).total_seconds():.1f} segundos.")
+    print("=" * 68)
 
 
 if __name__ == "__main__":
