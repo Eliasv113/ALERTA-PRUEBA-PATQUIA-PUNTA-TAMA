@@ -275,22 +275,47 @@ def leer_poligono(valor):
     return puntos
 
 
-def localidades_afectadas(area):
-    """Devuelve las localidades que están dentro de algún polígono del área."""
+def localidades_por_departamento_cap(area_desc):
+    """Relaciona el areaDesc CAP con las localidades autorizadas.
+
+    Se exige que Independencia esté identificado junto con La Rioja para
+    evitar coincidencias accidentales con departamentos homónimos de otras
+    provincias. Se admiten variantes habituales para General Ángel Vicente
+    Peñaloza.
+    """
+    import re
+
+    limpio = normalizar_texto(area_desc or "")
     afectadas = set()
+
+    if re.search(r"\bla rioja\b", limpio) and re.search(r"\bindependencia\b", limpio):
+        afectadas.add("Patquía")
+
+    if re.search(r"\bla rioja\b", limpio):
+        patrones_penaloza = (
+            r"\bgeneral\s+angel\s+vicente\s+penaloza\b",
+            r"\bgral\s+angel\s+vicente\s+penaloza\b",
+            r"\b(?:general|gral)\s+a\s+v\s+penaloza\b",
+            r"\bangel\s+vicente\s+penaloza\b",
+        )
+        if any(re.search(patron, limpio) for patron in patrones_penaloza):
+            afectadas.update({"Punta de los Llanos", "Tama"})
+
+    return afectadas.intersection(LOCALIDADES_PERMITIDAS)
+
+
+def localidades_afectadas(area, area_desc=""):
+    """Combina coincidencia CAP por polígono y por departamento declarado."""
+    afectadas = set(localidades_por_departamento_cap(area_desc))
 
     for elemento in todos_hijos(area, "polygon"):
         poligono = leer_poligono(elemento.text)
 
         for nombre, coordenadas in LOCALIDADES.items():
-            if punto_en_poligono(
-                coordenadas[0],
-                coordenadas[1],
-                poligono,
-            ):
+            if punto_en_poligono(coordenadas[0], coordenadas[1], poligono):
                 afectadas.add(nombre)
 
-    return afectadas
+    return afectadas.intersection(LOCALIDADES_PERMITIDAS)
 
 
 # =========================================================
@@ -803,7 +828,7 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
             poligonos = todos_hijos(area, "polygon")
             total_poligonos += len(poligonos)
             area_desc = texto(area, "areaDesc", "Área sin descripción")
-            afectadas_area = localidades_afectadas(area)
+            afectadas_area = localidades_afectadas(area, area_desc)
             print(
                 f"[CAP] Info {numero_info} / área {numero_area}: {area_desc} | "
                 f"polígonos={len(poligonos)} | coincidencias="
@@ -827,11 +852,11 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
     if not localidades or info_elegida is None:
         print(
             f"[CAP] SIN COINCIDENCIA: el documento {identificador} no contiene "
-            "un polígono que incluya Patquía, Punta de los Llanos o Tama."
+            "ni por departamento declarado ni por polígono para las localidades autorizadas."
         )
         return
 
-    print(f"[CAP] COINCIDENCIA GEOGRÁFICA: {', '.join(sorted(localidades))}. Enviando a Telegram...")
+    print(f"[CAP] COINCIDENCIA (departamento y/o polígono): {', '.join(sorted(localidades))}. Enviando a Telegram...")
 
     # PRIMERO: entregar la alerta textual. No descargar gráficos antes de avisar.
     mensaje = construir_mensaje(raiz, info_elegida, localidades)
@@ -874,7 +899,12 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
 # =========================================================
 
 def enlaces_cap(contenido, url_base=RSS_URL):
-    """Recupera todos los XML CAP individuales enlazados desde cada <item>."""
+    """Recupera enlaces CAP aunque el RSS tenga XML malformado.
+
+    Intenta feedparser, extracción por bloques RSS y finalmente búsqueda de
+    URLs CAP individuales en el cuerpo recibido. Un feed vacío o ilegible no
+    debe derribar el resto del sistema.
+    """
     import re
 
     feed = feedparser.parse(contenido)
@@ -883,7 +913,7 @@ def enlaces_cap(contenido, url_base=RSS_URL):
     def limpiar_valor(valor):
         valor = html.unescape(str(valor or "")).strip()
         valor = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", valor, flags=re.DOTALL)
-        valor = re.sub(r"<[^>]+>", "", valor).strip()
+        valor = re.sub(r"<[^>]+>", "", valor).strip().strip("\"\'")
         return valor
 
     def agregar_enlace(valor, origen):
@@ -892,64 +922,58 @@ def enlaces_cap(contenido, url_base=RSS_URL):
             return
         enlace = urljoin(url_base, valor)
         if url_http_valida(enlace) and enlace not in enlaces:
+            # Evita tomar el propio índice RSS como si fuera un CAP individual.
+            if enlace.rstrip("/").lower() == url_base.rstrip("/").lower():
+                return
             enlaces.append(enlace)
             print(f"[CAP-RSS] Enlace recuperado desde {origen}: {enlace}")
 
-    # Primera vía: feedparser, incluyendo todos los href que devuelva.
     for entrada in feed.entries:
-        enlace_principal = entrada.get("link", "")
-        if enlace_principal:
-            agregar_enlace(enlace_principal, "feedparser/link")
-        for item in entrada.get("links", []):
-            href = item.get("href", "")
-            if href:
-                agregar_enlace(href, "feedparser/links")
+        agregar_enlace(entrada.get("link", ""), "feedparser/link")
+        for item_link in entrada.get("links", []):
+            agregar_enlace(item_link.get("href", ""), "feedparser/links")
 
-    # Segunda vía: inspección por item del RSS original. No se usa un regex
-    # global para evitar capturar el link del canal en lugar del link del aviso.
     contenido_texto = (
         contenido.decode("utf-8-sig", errors="replace")
         if isinstance(contenido, bytes) else str(contenido or "")
     )
+
+    # Extracción tolerante por item: no depende de que el documento completo
+    # sea XML válido ni de que las etiquetas internas estén bien balanceadas.
     items = re.findall(
-        r"<item\b[^>]*>(.*?)</item\s*>",
+        r"<(?:[\w.-]+:)?item\b[^>]*>(.*?)</(?:[\w.-]+:)?item\s*>",
         contenido_texto,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    enlaces_antes_respaldo = len(enlaces)
-
     for numero_item, bloque in enumerate(items, start=1):
-        links = re.findall(
-            r"<link\b[^>]*>(.*?)</link\s*>",
-            bloque,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        for valor in links:
-            agregar_enlace(valor, f"item {numero_item}/link")
-
-        # Algunos items pueden publicar el documento únicamente en guid.
-        if not links:
-            guids = re.findall(
-                r"<guid\b[^>]*>(.*?)</guid\s*>",
+        for etiqueta in ("link", "guid"):
+            valores = re.findall(
+                rf"<(?:[\w.-]+:)?{etiqueta}\b[^>]*>(.*?)</(?:[\w.-]+:)?{etiqueta}\s*>",
                 bloque,
                 flags=re.IGNORECASE | re.DOTALL,
             )
-            for valor in guids:
-                agregar_enlace(valor, f"item {numero_item}/guid")
+            for valor in valores:
+                agregar_enlace(valor, f"item {numero_item}/{etiqueta}")
+
+    # Último respaldo: algunas respuestas del SMN incluyen las URLs CAP en
+    # HTML, CDATA u otros fragmentos que no se recuperan como <item>.
+    patrones_url = (
+        r"https?://[^\s<>\"']*(?:CAP|cap)[^\s<>\"']?\.xml(?:\?[^\s<>\"']*)?",
+        r"(?:/|\.\./)[^\s<>\"']*(?:CAP|cap)[^\s<>\"']?\.xml(?:\?[^\s<>\"']*)?",
+    )
+    for patron in patrones_url:
+        for valor in re.findall(patron, contenido_texto, flags=re.IGNORECASE):
+            agregar_enlace(valor, "respaldo/URL CAP encontrada en el contenido")
 
     print(
         f"[CAP-RSS] Entradas feedparser: {len(feed.entries)} | "
-        f"Items del RSS: {len(items)} | Enlaces únicos: {len(enlaces)} | "
-        f"Enlaces nuevos por respaldo: {len(enlaces) - enlaces_antes_respaldo} | "
+        f"Items recuperados: {len(items)} | Enlaces únicos: {len(enlaces)} | "
         f"Feed con advertencias: {bool(feed.bozo)}"
     )
     if feed.bozo:
         print(f"[CAP-RSS] Advertencia feedparser: {feed.bozo_exception}")
     if not enlaces:
-        raise ValueError(
-            "El feed CAP no devolvió enlaces individuales en <link> ni <guid>. "
-            f"Entradas feedparser={len(feed.entries)}, items RSS={len(items)}."
-        )
+        print("[CAP-RSS] ADVERTENCIA: no se pudieron recuperar enlaces CAP individuales; se continúa con GeoRSS y el resto del flujo.")
     return enlaces
 
 
@@ -992,8 +1016,12 @@ def localidades_georss(descripcion):
     limpio = normalizar_texto(__import__("re").sub(r"<[^>]+>", " ", descripcion))
     afectadas = set()
 
+    # Para evitar falsos positivos en otras provincias, se exige la mención
+    # explícita de LA RIOJA junto con el departamento.
+    es_la_rioja = bool(__import__("re").search(r"\bla rioja\b", limpio))
+
     # Patquía pertenece al departamento Independencia.
-    if __import__("re").search(r"\bindependencia\b", limpio):
+    if es_la_rioja and __import__("re").search(r"\bindependencia\b", limpio):
         afectadas.add("Patquía")
 
     # Punta de los Llanos y Tama pertenecen al departamento General Ángel
@@ -1005,7 +1033,7 @@ def localidades_georss(descripcion):
         r"\bgeneral\s+a\s+v\s+penaloza\b",
         r"\bgral\s+a\s+v\s+penaloza\b",
     )
-    if any(__import__("re").search(patron, limpio) for patron in patrones_penaloza):
+    if es_la_rioja and any(__import__("re").search(patron, limpio) for patron in patrones_penaloza):
         afectadas.update({"Punta de los Llanos", "Tama"})
 
     return afectadas.intersection(LOCALIDADES_PERMITIDAS)
@@ -1171,7 +1199,10 @@ def procesar_georss(contenido, historial, claves_procesadas):
             fecha_xml = texto(item, "date", "")
 
         registrar_demora_publicacion("GeoRSS-ACP", fecha_xml)
-        afectadas = localidades_georss(descripcion)
+        texto_completo_item = " ".join(
+            fragmento.strip() for fragmento in item.itertext() if fragmento and fragmento.strip()
+        )
+        afectadas = localidades_georss(texto_completo_item)
         if not afectadas:
             print(f"ACP sin coincidencia con las localidades autorizadas: {titulo}")
             continue
@@ -1370,10 +1401,10 @@ def ejecutar():
             )
 
             if documentos_leidos == 0:
-                raise RuntimeError(
-                    "No se pudo procesar ningún documento CAP individual. "
-                    f"Enlaces recuperados: {len(enlaces)}; "
-                    f"errores: {documentos_fallidos}."
+                print(
+                    "[CAP-RSS] ADVERTENCIA: no se pudo analizar ningún CAP individual. "
+                    f"Enlaces recuperados: {len(enlaces)}; errores: {documentos_fallidos}. "
+                    "La ejecución continuará sin interrumpir las demás fuentes."
                 )
 
     except (
@@ -1383,7 +1414,7 @@ def ejecutar():
         ValueError,
     ) as error:
         print(f"ERROR consultando el canal CAP del SMN: {error}")
-        raise
+        print("La consulta CAP falló, pero la ejecución no se interrumpirá por esta fuente.")
 
 
     fin_ejecucion = ahora_utc()
