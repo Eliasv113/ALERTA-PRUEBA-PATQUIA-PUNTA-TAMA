@@ -851,13 +851,27 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
 
 def enlaces_cap(contenido, url_base=RSS_URL):
     """
-    Extrae los enlaces de comunicados CAP desde un RSS/Atom.
-    feedparser permite recuperar entradas aunque el RSS tenga errores
-    de marcado que impidan analizarlo con ElementTree.
+    Recupera los enlaces a documentos CAP individuales desde el RSS del SMN.
+
+    Primero utiliza feedparser. Como respaldo, inspecciona cada bloque <item>
+    directamente para recuperar <link>, incluso si el RSS tiene errores de
+    marcado que impiden interpretar correctamente todas las entradas.
     """
+    import re
+
     feed = feedparser.parse(contenido)
     enlaces = []
 
+    def agregar_enlace(valor):
+        valor = html.unescape(str(valor or "")).strip()
+        valor = re.sub(r"^<!\[CDATA\[(.*)\]\]>$", r"\\1", valor, flags=re.DOTALL).strip()
+        if not valor:
+            return
+        enlace = urljoin(url_base, valor)
+        if url_http_valida(enlace) and enlace not in enlaces:
+            enlaces.append(enlace)
+
+    # Primera vía: enlaces interpretados por feedparser.
     for entrada in feed.entries:
         candidatos = []
 
@@ -872,33 +886,61 @@ def enlaces_cap(contenido, url_base=RSS_URL):
                 candidatos.append(href)
 
         for candidato in candidatos:
-            candidato = str(candidato or "").strip()
-            if not candidato:
-                continue
+            agregar_enlace(candidato)
 
-            enlace = urljoin(url_base, candidato)
-            if url_http_valida(enlace):
-                enlaces.append(enlace)
+    # Respaldo: extraer <link> de cada <item> del RSS original.
+    # Esto cubre feeds parcialmente malformados que feedparser no reconstruya.
+    if isinstance(contenido, bytes):
+        contenido_texto = contenido.decode("utf-8", errors="replace")
+    else:
+        contenido_texto = str(contenido or "")
 
-    # Conserva el orden y elimina duplicados.
-    enlaces = list(dict.fromkeys(enlaces))
+    items = re.findall(
+        r"<item\b[^>]*>(.*?)</item\s*>",
+        contenido_texto,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    enlaces_antes_respaldo = len(enlaces)
+    for bloque in items:
+        coincidencias = re.findall(
+            r"<link\b[^>]*>(.*?)</link\s*>",
+            bloque,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for coincidencia in coincidencias:
+            agregar_enlace(re.sub(r"<[^>]+>", "", coincidencia).strip())
+
+    # Último respaldo: algunos feeds publican la URL del XML en <guid>
+    # cuando el <link> de un item no pudo recuperarse.
+    if not enlaces:
+        for bloque in items:
+            coincidencias = re.findall(
+                r"<guid\b[^>]*>(.*?)</guid\s*>",
+                bloque,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            for coincidencia in coincidencias:
+                agregar_enlace(re.sub(r"<[^>]+>", "", coincidencia).strip())
 
     print(
-        f"[CAP-RSS] Entradas recuperadas: {len(feed.entries)} | "
+        f"[CAP-RSS] Entradas feedparser: {len(feed.entries)} | "
+        f"Bloques <item> recuperados: {len(items)} | "
         f"Enlaces CAP únicos: {len(enlaces)} | "
+        f"Enlaces agregados por respaldo: {len(enlaces) - enlaces_antes_respaldo} | "
         f"Feed con advertencias: {bool(feed.bozo)}"
     )
 
     if feed.bozo:
         print(
-            "[CAP-RSS] Advertencia de formato RSS; se utilizaron "
-            f"las entradas recuperables. Detalle: {feed.bozo_exception}"
+            "[CAP-RSS] Advertencia de formato RSS; se recuperaron las entradas "
+            f"posibles. Detalle: {feed.bozo_exception}"
         )
 
     if not enlaces:
         raise ValueError(
-            "El RSS CAP no devolvió enlaces recuperables. "
-            f"Entradas detectadas: {len(feed.entries)}."
+            "El RSS CAP no devolvió enlaces recuperables en <link> ni en <guid>. "
+            f"Entradas feedparser: {len(feed.entries)}; bloques <item>: {len(items)}."
         )
 
     return enlaces
