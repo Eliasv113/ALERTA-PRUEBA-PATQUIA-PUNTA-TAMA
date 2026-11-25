@@ -769,33 +769,47 @@ def construir_mensaje(alerta, info, localidades, recursos_sin_adjunto=None):
 # =========================================================
 
 def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
-    """Procesa una alerta CAP y entrega primero el texto, sin esperar imágenes."""
+    """Procesa un documento CAP individual y diagnostica sus polígonos."""
     raiz = ET.fromstring(contenido)
 
     if nombre_etiqueta(raiz) != "alert":
-        print("El documento recibido no es un XML CAP.")
+        print(f"[CAP] Documento ignorado: raíz XML '{nombre_etiqueta(raiz)}', no es <alert>.")
         return
 
     identificador = texto(raiz, "identifier", "")
     enviado = texto(raiz, "sent", "")
+    evento_raiz = texto(raiz, "event", "Evento no informado")
+    print(f"[CAP] Analizando evento: {evento_raiz} | ID: {identificador} | URL: {url_cap}")
     registrar_demora_publicacion("CAP", enviado)
     if not identificador:
-        print("Se encontró una alerta sin identificador; se omite.")
+        print("[CAP] Documento sin identifier; se omite.")
         return
 
     clave = clave_alerta(identificador, enviado)
     if clave in historial or clave in claves_procesadas:
-        print(f"Alerta ya notificada: {identificador}")
+        print(f"[CAP] Alerta ya notificada; se omite por historial: {identificador}")
         return
 
     localidades = set()
     info_elegida = None
     recursos_encontrados = []
+    total_areas = 0
+    total_poligonos = 0
 
-    for info in todos_hijos(raiz, "info"):
+    for numero_info, info in enumerate(todos_hijos(raiz, "info"), start=1):
         localidades_info = set()
-        for area in todos_hijos(info, "area"):
-            localidades_info.update(localidades_afectadas(area))
+        for numero_area, area in enumerate(todos_hijos(info, "area"), start=1):
+            total_areas += 1
+            poligonos = todos_hijos(area, "polygon")
+            total_poligonos += len(poligonos)
+            area_desc = texto(area, "areaDesc", "Área sin descripción")
+            afectadas_area = localidades_afectadas(area)
+            print(
+                f"[CAP] Info {numero_info} / área {numero_area}: {area_desc} | "
+                f"polígonos={len(poligonos)} | coincidencias="
+                f"{', '.join(sorted(afectadas_area)) if afectadas_area else 'ninguna'}"
+            )
+            localidades_info.update(afectadas_area)
 
         if localidades_info:
             localidades.update(localidades_info)
@@ -803,23 +817,33 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
                 info_elegida = info
             recursos_encontrados.extend(extraer_recursos(info, url_cap))
 
+    print(
+        f"[CAP] Diagnóstico del documento {identificador}: "
+        f"áreas={total_areas}, polígonos={total_poligonos}, "
+        f"localidades detectadas={', '.join(sorted(localidades)) if localidades else 'ninguna'}"
+    )
+
     localidades.intersection_update(LOCALIDADES_PERMITIDAS)
     if not localidades or info_elegida is None:
-        print(f"Sin coincidencias geográficas con las localidades permitidas: {identificador}")
+        print(
+            f"[CAP] SIN COINCIDENCIA: el documento {identificador} no contiene "
+            "un polígono que incluya Patquía, Punta de los Llanos o Tama."
+        )
         return
 
-    print(f"Localidades autorizadas detectadas para {identificador}: {', '.join(sorted(localidades))}")
+    print(f"[CAP] COINCIDENCIA GEOGRÁFICA: {', '.join(sorted(localidades))}. Enviando a Telegram...")
 
     # PRIMERO: entregar la alerta textual. No descargar gráficos antes de avisar.
     mensaje = construir_mensaje(raiz, info_elegida, localidades)
     enviar_telegram(mensaje)
+    print(f"[CAP] CONFIRMADO: Telegram aceptó la alerta {identificador}.")
 
-    # El historial se guarda inmediatamente tras confirmar el envío del texto.
+    # Guardar el historial inmediatamente tras confirmar el envío del texto.
     historial.add(clave)
     claves_procesadas.add(clave)
     guardar_historial(historial)
 
-    # DESPUÉS: adjuntar recursos. Los fallos gráficos no retrasan ni anulan el aviso.
+    # DESPUÉS: adjuntar recursos; los fallos gráficos no retrasan ni anulan el aviso.
     recursos_unicos = []
     vistos = set()
     for recurso in recursos_encontrados:
@@ -850,99 +874,82 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
 # =========================================================
 
 def enlaces_cap(contenido, url_base=RSS_URL):
-    """
-    Recupera los enlaces a documentos CAP individuales desde el RSS del SMN.
-
-    Primero utiliza feedparser. Como respaldo, inspecciona cada bloque <item>
-    directamente para recuperar <link>, incluso si el RSS tiene errores de
-    marcado que impiden interpretar correctamente todas las entradas.
-    """
+    """Recupera todos los XML CAP individuales enlazados desde cada <item>."""
     import re
 
     feed = feedparser.parse(contenido)
     enlaces = []
 
-    def agregar_enlace(valor):
+    def limpiar_valor(valor):
         valor = html.unescape(str(valor or "")).strip()
-        valor = re.sub(r"^<!\[CDATA\[(.*)\]\]>$", r"\\1", valor, flags=re.DOTALL).strip()
+        valor = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", valor, flags=re.DOTALL)
+        valor = re.sub(r"<[^>]+>", "", valor).strip()
+        return valor
+
+    def agregar_enlace(valor, origen):
+        valor = limpiar_valor(valor)
         if not valor:
             return
         enlace = urljoin(url_base, valor)
         if url_http_valida(enlace) and enlace not in enlaces:
             enlaces.append(enlace)
+            print(f"[CAP-RSS] Enlace recuperado desde {origen}: {enlace}")
 
-    # Primera vía: enlaces interpretados por feedparser.
+    # Primera vía: feedparser, incluyendo todos los href que devuelva.
     for entrada in feed.entries:
-        candidatos = []
-
         enlace_principal = entrada.get("link", "")
         if enlace_principal:
-            candidatos.append(enlace_principal)
-
+            agregar_enlace(enlace_principal, "feedparser/link")
         for item in entrada.get("links", []):
-            rel = item.get("rel", "alternate")
             href = item.get("href", "")
-            if href and rel in ("alternate", "enclosure"):
-                candidatos.append(href)
+            if href:
+                agregar_enlace(href, "feedparser/links")
 
-        for candidato in candidatos:
-            agregar_enlace(candidato)
-
-    # Respaldo: extraer <link> de cada <item> del RSS original.
-    # Esto cubre feeds parcialmente malformados que feedparser no reconstruya.
-    if isinstance(contenido, bytes):
-        contenido_texto = contenido.decode("utf-8", errors="replace")
-    else:
-        contenido_texto = str(contenido or "")
-
+    # Segunda vía: inspección por item del RSS original. No se usa un regex
+    # global para evitar capturar el link del canal en lugar del link del aviso.
+    contenido_texto = (
+        contenido.decode("utf-8-sig", errors="replace")
+        if isinstance(contenido, bytes) else str(contenido or "")
+    )
     items = re.findall(
         r"<item\b[^>]*>(.*?)</item\s*>",
         contenido_texto,
         flags=re.IGNORECASE | re.DOTALL,
     )
-
     enlaces_antes_respaldo = len(enlaces)
-    for bloque in items:
-        coincidencias = re.findall(
+
+    for numero_item, bloque in enumerate(items, start=1):
+        links = re.findall(
             r"<link\b[^>]*>(.*?)</link\s*>",
             bloque,
             flags=re.IGNORECASE | re.DOTALL,
         )
-        for coincidencia in coincidencias:
-            agregar_enlace(re.sub(r"<[^>]+>", "", coincidencia).strip())
+        for valor in links:
+            agregar_enlace(valor, f"item {numero_item}/link")
 
-    # Último respaldo: algunos feeds publican la URL del XML en <guid>
-    # cuando el <link> de un item no pudo recuperarse.
-    if not enlaces:
-        for bloque in items:
-            coincidencias = re.findall(
+        # Algunos items pueden publicar el documento únicamente en guid.
+        if not links:
+            guids = re.findall(
                 r"<guid\b[^>]*>(.*?)</guid\s*>",
                 bloque,
                 flags=re.IGNORECASE | re.DOTALL,
             )
-            for coincidencia in coincidencias:
-                agregar_enlace(re.sub(r"<[^>]+>", "", coincidencia).strip())
+            for valor in guids:
+                agregar_enlace(valor, f"item {numero_item}/guid")
 
     print(
         f"[CAP-RSS] Entradas feedparser: {len(feed.entries)} | "
-        f"Bloques <item> recuperados: {len(items)} | "
-        f"Enlaces CAP únicos: {len(enlaces)} | "
-        f"Enlaces agregados por respaldo: {len(enlaces) - enlaces_antes_respaldo} | "
+        f"Items del RSS: {len(items)} | Enlaces únicos: {len(enlaces)} | "
+        f"Enlaces nuevos por respaldo: {len(enlaces) - enlaces_antes_respaldo} | "
         f"Feed con advertencias: {bool(feed.bozo)}"
     )
-
     if feed.bozo:
-        print(
-            "[CAP-RSS] Advertencia de formato RSS; se recuperaron las entradas "
-            f"posibles. Detalle: {feed.bozo_exception}"
-        )
-
+        print(f"[CAP-RSS] Advertencia feedparser: {feed.bozo_exception}")
     if not enlaces:
         raise ValueError(
-            "El RSS CAP no devolvió enlaces recuperables en <link> ni en <guid>. "
-            f"Entradas feedparser: {len(feed.entries)}; bloques <item>: {len(items)}."
+            "El feed CAP no devolvió enlaces individuales en <link> ni <guid>. "
+            f"Entradas feedparser={len(feed.entries)}, items RSS={len(items)}."
         )
-
     return enlaces
 
 
@@ -1315,7 +1322,7 @@ def ejecutar():
             enlaces = enlaces_cap(contenido_rss, url_base=url_base_rss)
             print(
                 f"[CAP-RSS] Feed recibido: {len(enlaces)} enlaces. "
-                "Procesando comunicados individuales..."
+                "Se inspeccionarán TODOS los documentos individuales, sin filtrar por título."
             )
 
             documentos_leidos = 0
@@ -1344,6 +1351,7 @@ def ejecutar():
                         url_cap=respuesta_cap.url or enlace,
                     )
                     documentos_leidos += 1
+                    print(f"[CAP] Documento válido y analizado ({documentos_leidos}/{len(enlaces)}): {enlace}")
 
                 except (
                     requests.RequestException,
