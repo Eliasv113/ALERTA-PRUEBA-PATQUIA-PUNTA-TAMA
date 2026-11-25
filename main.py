@@ -5,6 +5,7 @@ import hashlib
 import base64
 import mimetypes
 import requests
+import feedparser
 import xml.etree.ElementTree as ET
 
 from datetime import datetime, timezone
@@ -848,34 +849,59 @@ def procesar_cap(contenido, historial, claves_procesadas, url_cap=RSS_URL):
 # LECTURA DEL FEED DEL SMN
 # =========================================================
 
-def enlaces_cap(contenido):
-    """Extrae los enlaces XML CAP de un RSS o Atom."""
-    raiz = ET.fromstring(contenido)
-
-    if nombre_etiqueta(raiz) == "alert":
-        return [None]
-
+def enlaces_cap(contenido, url_base=RSS_URL):
+    """
+    Extrae los enlaces de comunicados CAP desde un RSS/Atom.
+    feedparser permite recuperar entradas aunque el RSS tenga errores
+    de marcado que impidan analizarlo con ElementTree.
+    """
+    feed = feedparser.parse(contenido)
     enlaces = []
 
-    for elemento in raiz.iter():
-        nombre = nombre_etiqueta(elemento)
+    for entrada in feed.entries:
+        candidatos = []
 
-        if nombre == "item":
-            for item_hijo in elemento:
-                if nombre_etiqueta(item_hijo) == "link" and item_hijo.text:
-                    enlaces.append(item_hijo.text.strip())
+        enlace_principal = entrada.get("link", "")
+        if enlace_principal:
+            candidatos.append(enlace_principal)
 
-        elif nombre == "entry":
-            for item_hijo in elemento:
-                if nombre_etiqueta(item_hijo) == "link":
-                    href = item_hijo.attrib.get("href")
-                    rel = item_hijo.attrib.get("rel", "alternate")
+        for item in entrada.get("links", []):
+            rel = item.get("rel", "alternate")
+            href = item.get("href", "")
+            if href and rel in ("alternate", "enclosure"):
+                candidatos.append(href)
 
-                    if href and rel in ("alternate", "enclosure"):
-                        enlaces.append(href.strip())
+        for candidato in candidatos:
+            candidato = str(candidato or "").strip()
+            if not candidato:
+                continue
 
-    # Conserva el orden y elimina enlaces duplicados.
-    return list(dict.fromkeys(enlaces))
+            enlace = urljoin(url_base, candidato)
+            if url_http_valida(enlace):
+                enlaces.append(enlace)
+
+    # Conserva el orden y elimina duplicados.
+    enlaces = list(dict.fromkeys(enlaces))
+
+    print(
+        f"[CAP-RSS] Entradas recuperadas: {len(feed.entries)} | "
+        f"Enlaces CAP únicos: {len(enlaces)} | "
+        f"Feed con advertencias: {bool(feed.bozo)}"
+    )
+
+    if feed.bozo:
+        print(
+            "[CAP-RSS] Advertencia de formato RSS; se utilizaron "
+            f"las entradas recuperables. Detalle: {feed.bozo_exception}"
+        )
+
+    if not enlaces:
+        raise ValueError(
+            "El RSS CAP no devolvió enlaces recuperables. "
+            f"Entradas detectadas: {len(feed.entries)}."
+        )
+
+    return enlaces
 
 
 
@@ -1214,37 +1240,101 @@ def ejecutar():
         print(f"ERROR consultando GeoRSS ACP del SMN: {error}")
 
     try:
-        respuesta = consultar_url_smn(RSS_URL, timeout=(5, 15), nombre_fuente="CAP-RSS")
-        enlaces = enlaces_cap(respuesta.content)
-        raiz = ET.fromstring(respuesta.content)
+        respuesta = consultar_url_smn(
+            RSS_URL,
+            timeout=(5, 15),
+            nombre_fuente="CAP-RSS",
+        )
 
-        if nombre_etiqueta(raiz) == "alert":
+        contenido_rss = respuesta.content
+        url_base_rss = respuesta.url or RSS_URL
+
+        # Primero se comprueba si la respuesta es un CAP individual.
+        # Si es un RSS malformado, ElementTree puede fallar aquí:
+        # en ese caso se continúa con feedparser para recuperar sus entradas.
+        es_cap_individual = False
+        try:
+            raiz = ET.fromstring(contenido_rss)
+            es_cap_individual = nombre_etiqueta(raiz) == "alert"
+        except ET.ParseError as error_xml:
+            print(
+                "[CAP-RSS] El documento no se pudo leer como XML estricto "
+                f"({error_xml}). Se intentará recuperar el RSS."
+            )
+
+        if es_cap_individual:
             procesar_cap(
-                respuesta.content,
+                contenido_rss,
                 historial,
                 claves_procesadas,
-                url_cap=respuesta.url or RSS_URL,
+                url_cap=url_base_rss,
             )
         else:
-            print(f"Feed CAP recibido: {len(enlaces)} enlaces. Procesando documentos...")
+            enlaces = enlaces_cap(contenido_rss, url_base=url_base_rss)
+            print(
+                f"[CAP-RSS] Feed recibido: {len(enlaces)} enlaces. "
+                "Procesando comunicados individuales..."
+            )
+
+            documentos_leidos = 0
+            documentos_fallidos = 0
+
             for enlace in enlaces:
                 try:
-                    url_cap = urljoin(respuesta.url or RSS_URL, enlace)
                     respuesta_cap = consultar_url_smn(
-                        url_cap,
+                        enlace,
                         timeout=(5, 12),
                         nombre_fuente="Documento-CAP",
                     )
+
+                    # Validación previa: cada enlace debe devolver un CAP
+                    # individual válido antes de pasar a la comparación geográfica.
+                    raiz_cap = ET.fromstring(respuesta_cap.content)
+                    if nombre_etiqueta(raiz_cap) != "alert":
+                        raise ValueError(
+                            "El enlace del RSS no devolvió un documento CAP <alert>."
+                        )
+
                     procesar_cap(
                         respuesta_cap.content,
                         historial,
                         claves_procesadas,
-                        url_cap=respuesta_cap.url or url_cap,
+                        url_cap=respuesta_cap.url or enlace,
                     )
-                except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
-                    print(f"Error al procesar documento CAP {enlace}: {error}")
-    except (requests.RequestException, ET.ParseError, RuntimeError, ValueError) as error:
+                    documentos_leidos += 1
+
+                except (
+                    requests.RequestException,
+                    ET.ParseError,
+                    RuntimeError,
+                    ValueError,
+                ) as error:
+                    documentos_fallidos += 1
+                    print(
+                        f"[CAP] Error al procesar documento {enlace}: {error}"
+                    )
+
+            print(
+                f"[CAP-RSS] Resumen: {documentos_leidos} documento(s) "
+                f"CAP leído(s), {documentos_fallidos} con error."
+            )
+
+            if documentos_leidos == 0:
+                raise RuntimeError(
+                    "No se pudo procesar ningún documento CAP individual. "
+                    f"Enlaces recuperados: {len(enlaces)}; "
+                    f"errores: {documentos_fallidos}."
+                )
+
+    except (
+        requests.RequestException,
+        ET.ParseError,
+        RuntimeError,
+        ValueError,
+    ) as error:
         print(f"ERROR consultando el canal CAP del SMN: {error}")
+        raise
+
 
     fin_ejecucion = ahora_utc()
     print(f"Fin UTC: {fin_ejecucion.isoformat()}")
